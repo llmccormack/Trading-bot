@@ -6,4 +6,5 @@ __pycache__/
 *.pyo
 .DS_Store
 autopilot_state.json
-data/
+data/*.csv
+data/*.json
