@@ -1,0 +1,9 @@
+.env
+*.duckdb
+*.log
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+autopilot_state.json
+data/
