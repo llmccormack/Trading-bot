@@ -2383,11 +2383,33 @@ function renderApLog() {
     log.innerHTML='<div style="text-align:center;padding:24px;color:var(--text-muted);font-size:12px;">No activity yet</div>';
     return;
   }
-  log.innerHTML = apActivity.slice(0,15).map(e=>`
+  log.innerHTML = apActivity.slice(0,100).map(e=>`
     <div class="activity-entry ${e.type}">
       <span class="activity-time">${e.time}</span>
       <span class="activity-msg">${e.msg}</span>
     </div>`).join('');
+}
+
+async function loadServerLog() {
+  try {
+    const res = await fetch(API + '/api/ap-log?lines=100');
+    const data = await res.json();
+    const lines = (data.lines || []).reverse();
+    lines.forEach(line => {
+      const timeMatch = line.match(/(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/);
+      const t = timeMatch ? timeMatch[1].slice(5).replace(' ', ' ') : '—';
+      const body = line.replace(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+\s+\w+\s+/, '');
+      const type = line.includes('SIGNAL') ? 'signal'
+                 : line.includes('TRADE OPENED') || line.includes('AUTO-CLOSE') || line.includes('FILLED') ? 'trade'
+                 : line.includes('SKIP') || line.includes('REJECTED') || line.includes('WARNING') ? 'error'
+                 : 'check';
+      if (!apActivity.find(e => e.msg === body)) {
+        apActivity.push({ type, time: t, msg: body });
+      }
+    });
+    apActivity.sort((a, b) => b.time > a.time ? 1 : -1);
+    renderApLog();
+  } catch(e) {}
 }
 
 function apClearLog() {
@@ -3389,6 +3411,7 @@ window.addEventListener('load', ()=>{
   loadSettings();
   apRefreshServerStatus();
   apPollServerLog();
+  loadServerLog();
   // Refresh portfolio every 30s, tickers every 15s, server status every 60s
   setInterval(loadPortfolio, 30000);
   setInterval(loadAllTickers, 15000);
