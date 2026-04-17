@@ -33,6 +33,13 @@ import duckdb
 
 init_db()
 
+# Seed historical trades if DB is empty (survives Railway redeploys)
+try:
+    from seed_trades import seed as _seed_trades
+    _seed_trades()
+except Exception:
+    pass
+
 # ─────────────────────────────────────────────────────────────────────
 # PER-SYMBOL ENGINE ROUTING
 # Backtest data showed:
