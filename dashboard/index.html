@@ -3190,37 +3190,90 @@ async function loadJournal() {
   const wrCls  = s.win_rate>=0.5?'green':'red';
   const pnlCls = s.total_pnl>=0?'green':'red';
 
-  const rows = journal.trades.slice(0,200).map((t,i) => {
-    const isLong  = t.direction==='LONG'||t.direction==='BUY';
-    const win     = (t.pnl||0) > 0;
-    const pnl     = t.pnl||0;
-    const r       = t.r_multiple||0;
-    const openDt  = t.opened_at ? new Date(t.opened_at) : null;
-    const closeDt = t.closed_at ? new Date(t.closed_at) : null;
-    let dur = '—';
-    if(openDt && closeDt) {
-      const mins = Math.round((closeDt - openDt)/60000);
-      dur = mins < 60 ? `${mins}m` : `${Math.floor(mins/60)}h ${mins%60}m`;
-    }
-    const dateStr = openDt ? openDt.toLocaleDateString('en-US',{month:'short',day:'numeric'}) : '—';
-    const timeStr = openDt ? openDt.toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'}) : '';
-    return `<tr style="background:${win?'rgba(34,197,94,.03)':'rgba(239,68,68,.03)'}">
-      <td style="color:var(--text-muted);font-size:10px;">${dateStr}<br>${timeStr}</td>
-      <td style="font-weight:700;">${t.symbol}</td>
-      <td><span class="pill ${isLong?'pill-green':'pill-red'}">${isLong?'L':'S'}</span></td>
-      <td>${(t.entry_price||0).toFixed(2)}</td>
-      <td>${(t.exit_price||0).toFixed(2)}</td>
-      <td style="font-weight:700;color:${pnl>=0?'var(--green)':'var(--red)'};">${pnl>=0?'+':''}$${pnl.toFixed(2)}</td>
-      <td style="color:${r>=0?'var(--green)':'var(--red)'};">${r>=0?'+':''}${r.toFixed(2)}R</td>
-      <td style="color:var(--text-muted);font-size:11px;">${dur}</td>
-      <td style="color:var(--text-muted);font-size:10px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${t.strategy_used||'—'}</td>
-    </tr>`;
+  // Group trades by date
+  const today = new Date();
+  const todayStr = today.toDateString();
+  const yesterdayStr = new Date(today - 86400000).toDateString();
+
+  const byDay = {};
+  journal.trades.slice(0, 200).forEach(t => {
+    const dt = t.opened_at ? new Date(t.opened_at) : null;
+    const key = dt ? dt.toDateString() : 'Unknown';
+    if (!byDay[key]) byDay[key] = { date: dt, trades: [], pnl: 0 };
+    byDay[key].trades.push(t);
+    byDay[key].pnl += (t.pnl || 0);
+  });
+
+  const dayKeys = Object.keys(byDay).sort((a, b) => new Date(b) - new Date(a));
+
+  const dayBlocks = dayKeys.map(key => {
+    const day = byDay[key];
+    const dayPnl = day.pnl;
+    const wins = day.trades.filter(t => (t.pnl || 0) > 0).length;
+    const label = key === todayStr ? 'Today' :
+                  key === yesterdayStr ? 'Yesterday' :
+                  day.date ? day.date.toLocaleDateString('en-US', {weekday:'long', month:'short', day:'numeric'}) : key;
+
+    const tradeRows = day.trades.map(t => {
+      const isLong = t.direction === 'LONG' || t.direction === 'BUY';
+      const pnl = t.pnl || 0;
+      const r = t.r_multiple || 0;
+      const openDt = t.opened_at ? new Date(t.opened_at) : null;
+      const closeDt = t.closed_at ? new Date(t.closed_at) : null;
+      const timeStr = openDt ? openDt.toLocaleTimeString('en-US', {hour:'2-digit', minute:'2-digit'}) : '—';
+      let dur = '—';
+      if (openDt && closeDt) {
+        const mins = Math.round((closeDt - openDt) / 60000);
+        dur = mins < 60 ? `${mins}m` : `${Math.floor(mins/60)}h ${mins%60}m`;
+      }
+      const win = pnl > 0;
+      return `
+        <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;
+          border-radius:8px;background:${win?'rgba(34,197,94,0.04)':'rgba(239,68,68,0.04)'};
+          border:1px solid ${win?'rgba(34,197,94,0.12)':'rgba(239,68,68,0.12)'};margin-bottom:6px;">
+          <!-- Time -->
+          <div style="min-width:44px;font-size:10px;color:var(--text-muted);">${timeStr}</div>
+          <!-- Symbol + direction -->
+          <div style="min-width:80px;display:flex;align-items:center;gap:6px;">
+            <span style="font-weight:800;font-size:13px;">${t.symbol}</span>
+            <span class="pill ${isLong?'pill-green':'pill-red'}" style="font-size:9px;">${isLong?'LONG':'SHORT'}</span>
+          </div>
+          <!-- Entry → Exit -->
+          <div style="flex:1;font-size:11px;color:var(--text-muted);">
+            ${(t.entry_price||0).toFixed(2)} → ${(t.exit_price||0).toFixed(2)}
+            <span style="margin-left:6px;color:var(--text-dim);font-size:10px;">⏱ ${dur}</span>
+          </div>
+          <!-- R multiple -->
+          <div style="min-width:40px;text-align:right;font-size:11px;color:${r>=0?'var(--green)':'var(--red)'};">
+            ${r>=0?'+':''}${r.toFixed(2)}R
+          </div>
+          <!-- P&L -->
+          <div style="min-width:80px;text-align:right;font-weight:700;font-size:14px;color:${pnl>=0?'var(--green)':'var(--red)'};">
+            ${pnl>=0?'+':''}$${pnl.toFixed(2)}
+          </div>
+        </div>`;
+    }).join('');
+
+    return `
+      <!-- Day header -->
+      <div style="display:flex;align-items:center;justify-content:space-between;
+        padding:8px 0;margin-top:20px;margin-bottom:10px;
+        border-bottom:1px solid var(--border);">
+        <div>
+          <span style="font-size:13px;font-weight:700;color:var(--text-primary);">${label}</span>
+          <span style="font-size:11px;color:var(--text-muted);margin-left:10px;">${day.trades.length} trade${day.trades.length!==1?'s':''} · ${wins}W ${day.trades.length-wins}L</span>
+        </div>
+        <div style="font-size:14px;font-weight:700;color:${dayPnl>=0?'var(--green)':'var(--red)'};">
+          ${dayPnl>=0?'+':''}$${dayPnl.toFixed(2)}
+        </div>
+      </div>
+      ${tradeRows}`;
   }).join('');
 
   wrap.innerHTML = `
     <!-- Stats row -->
     <div class="section-label" style="margin-bottom:12px;">PERFORMANCE SUMMARY</div>
-    <div class="metrics-grid" style="grid-template-columns:repeat(6,1fr);margin-bottom:20px;">
+    <div class="metrics-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px;">
       <div class="metric-card"><div class="m-label">Trades</div><div class="m-value">${s.total_trades}</div></div>
       <div class="metric-card ${wrCls}"><div class="m-label">Win Rate</div><div class="m-value">${fmtPct(s.win_rate)}</div></div>
       <div class="metric-card ${pnlCls}"><div class="m-label">Total P&L</div><div class="m-value">${s.total_pnl>=0?'+':''}$${s.total_pnl.toFixed(2)}</div></div>
@@ -3232,18 +3285,9 @@ async function loadJournal() {
     <!-- Equity curve -->
     <div id="journalChart" style="height:180px;margin-bottom:24px;"></div>
 
-    <!-- Trade table -->
-    <div class="section-label" style="margin-bottom:10px;">TRADE HISTORY</div>
-    <div class="table-wrap">
-      <table class="data-table">
-        <thead><tr>
-          <th>Date</th><th>Symbol</th><th>Dir</th>
-          <th>Entry</th><th>Exit</th>
-          <th>P&L</th><th>R</th><th>Duration</th><th>Strategy</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
+    <!-- Trade history grouped by day -->
+    <div class="section-label" style="margin-bottom:4px;">TRADE HISTORY</div>
+    ${dayBlocks}`;
 
   // Equity curve chart
   const eq = journal.equity_curve || [];
