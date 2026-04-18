@@ -14,13 +14,17 @@ class Settings(BaseSettings):
     anthropic_api_key: str = Field(default="")
     polygon_api_key: str = Field(default="")
 
-    # IBKR
-    ibkr_host: str = Field(default="127.0.0.1")
-    ibkr_port: int = Field(default=7497)
-    ibkr_client_id: int = Field(default=1)
+    # Trading mode — "paper" | "tradovate_demo" | "tradovate_live"
+    trading_mode: str = Field(default="paper")
 
-    # Trading mode
-    trading_mode: str = Field(default="paper")  # "paper" or "live"
+    # Tradovate credentials (only needed when trading_mode starts with "tradovate")
+    tradovate_username:   str = Field(default="")
+    tradovate_password:   str = Field(default="")
+    tradovate_app_id:     str = Field(default="")
+    tradovate_app_secret: str = Field(default="")
+    tradovate_cid:        str = Field(default="")
+    tradovate_sec:        str = Field(default="")
+    tradovate_is_demo:    str = Field(default="true")   # "true" = demo, "false" = live
 
     # Risk
     max_risk_per_trade_pct: float = Field(default=1.0)
@@ -36,6 +40,10 @@ class Settings(BaseSettings):
     @property
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"
+
+    @property
+    def is_tradovate(self) -> bool:
+        return self.trading_mode.startswith("tradovate")
 
 
 settings = Settings()

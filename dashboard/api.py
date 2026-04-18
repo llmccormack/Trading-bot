@@ -23,6 +23,7 @@ from data.fetcher import fetch_historical, get_live_price
 from strategies.aggregator import SignalAggregator
 from risk.manager import RiskManager
 from execution.paper import PaperBroker
+from execution.tradovate import TradovateBroker
 from ai.agent import TradingAgent
 from data.store import init_db, DB_PATH, get_open_positions
 from backtesting.engine import BacktestEngine
@@ -428,8 +429,21 @@ def serve_icon192():
 def serve_icon512():
     return FileResponse(_DASH_DIR / "icon-512.png", media_type="image/png")
 
+# ── Broker factory — swap paper ↔ Tradovate via TRADING_MODE env var ── #
+def _make_broker():
+    rm = RiskManager()
+    if settings.is_tradovate:
+        try:
+            broker = TradovateBroker(risk_manager=rm)
+            _aplog.info("Broker: Tradovate (%s)", "DEMO" if settings.tradovate_is_demo == "true" else "LIVE")
+            return broker
+        except Exception as e:
+            _aplog.error("Tradovate init failed (%s) — falling back to paper", e)
+    _aplog.info("Broker: Paper trading")
+    return PaperBroker(risk_manager=rm)
+
 # ── Shared in-memory state (single-process, dev mode) ──────────────── #
-_broker  = PaperBroker(risk_manager=RiskManager())
+_broker  = _make_broker()
 _agent   = TradingAgent()
 _last_agg: dict = {}
 
@@ -447,8 +461,10 @@ def health():
 @app.get("/api/portfolio")
 def portfolio():
     p = _broker.portfolio_summary()
-    p["is_paper"]  = settings.is_paper
-    p["is_halted"] = _broker.risk_manager.is_halted
+    p["is_paper"]      = settings.is_paper
+    p["is_tradovate"]  = settings.is_tradovate
+    p["tradovate_demo"] = getattr(settings, "tradovate_is_demo", "true") == "true"
+    p["is_halted"]     = _broker.risk_manager.is_halted
 
     # Inject live price + unrealized P&L for each open position
     total_unrealized = 0.0

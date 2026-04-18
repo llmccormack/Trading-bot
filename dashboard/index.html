@@ -2038,8 +2038,13 @@ async function loadPortfolio() {
     }
     document.getElementById('statPositions').textContent = d.open_positions||0;
     const mb = document.getElementById('modeBadge');
-    mb.textContent = d.is_paper ? 'PAPER' : 'LIVE';
-    mb.className   = 'mode-badge '+(d.is_paper ? 'paper':'live');
+    if (d.is_tradovate) {
+      mb.textContent = d.tradovate_demo ? 'TV DEMO' : 'TV LIVE';
+      mb.className   = 'mode-badge ' + (d.tradovate_demo ? 'paper' : 'live');
+    } else {
+      mb.textContent = d.is_paper ? 'PAPER' : 'LIVE';
+      mb.className   = 'mode-badge ' + (d.is_paper ? 'paper' : 'live');
+    }
   } catch(e){}
 }
 
