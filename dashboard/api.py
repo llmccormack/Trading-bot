@@ -316,34 +316,58 @@ def _send_daily_summary(broker: "PaperBroker") -> None:
         today = datetime.now(_AP_ET).strftime("%Y-%m-%d")
         conn  = duckdb.connect(str(Path(__file__).resolve().parent.parent / "trading_bot.duckdb"))
         rows  = conn.execute("""
-            SELECT pnl, direction, symbol FROM trade_journal
+            SELECT pnl, direction, symbol, r_multiple FROM trade_journal
             WHERE closed_at::DATE = ?
+            ORDER BY closed_at
         """, [today]).fetchall()
+        # All-time stats for streak
+        all_rows = conn.execute("""
+            SELECT pnl FROM trade_journal ORDER BY closed_at DESC LIMIT 20
+        """).fetchall()
         conn.close()
 
-        n_trades = len(rows)
+        n_trades  = len(rows)
         total_pnl = sum(r[0] or 0 for r in rows)
         wins      = sum(1 for r in rows if (r[0] or 0) > 0)
         bal       = broker.account_balance
 
+        # Current win/loss streak
+        streak = 0
+        streak_word = ""
+        if all_rows:
+            stype = 1 if (all_rows[0][0] or 0) > 0 else -1
+            for row in all_rows:
+                if ((row[0] or 0) > 0) == (stype == 1):
+                    streak += 1
+                else:
+                    break
+            streak_word = f"{streak}W streak" if stype == 1 else f"{streak}L streak"
+
         if n_trades == 0:
-            body = "No trades taken today."
+            title = "📊 No Trades Today"
+            body  = f"Market closed flat. Balance: ${bal:,.2f}"
         else:
             wr = wins / n_trades * 100
-            body = (
-                f"{n_trades} trade{'s' if n_trades>1 else ''} | "
-                f"Win rate: {wr:.0f}%\n"
-                f"Day P&L: ${total_pnl:+.2f}\n"
+            emoji = "✅" if total_pnl > 0 else "❌"
+            trade_lines = "\n".join(
+                f"  {'✅' if (r[0] or 0)>0 else '❌'} {r[2]} {r[1]} ${r[0]:+.2f} ({r[3]:+.2f}R)"
+                for r in rows
+            )
+            title = f"{emoji} {today} — ${total_pnl:+.2f}"
+            body  = (
+                f"{n_trades} trade{'s' if n_trades>1 else ''} | {wins}W {n_trades-wins}L | {wr:.0f}% WR\n"
                 f"Balance: ${bal:,.2f}"
+                + (f" | {streak_word}" if streak_word else "") + "\n"
+                + trade_lines
             )
 
         _phone(
-            title    = f"📊 Daily Summary — {today}",
-            body     = body,
+            title    = title,
+            body     = body[:500],
             tags     = "bar_chart",
             priority = "default",
         )
-        _aplog.info(f"Daily summary sent: {body}")
+        _aplog.info(f"Daily summary sent: {title}")
     except Exception as e:
         _aplog.warning(f"Daily summary failed: {e}")
 
@@ -1271,21 +1295,66 @@ def get_journal(limit: int = 200):
 
         wins   = jdf[jdf["pnl"] > 0]
         losses = jdf[jdf["pnl"] <= 0]
-        cum_pnl = jdf["pnl"].iloc[::-1].cumsum().iloc[::-1]
+
+        # Equity curve (oldest → newest)
+        cum_pnl = jdf["pnl"].iloc[::-1].cumsum()
+
+        # ── Extra stats ──────────────────────────────────────────────
+        # Win/loss streak
+        results = [1 if p > 0 else -1 for p in jdf["pnl"].iloc[::-1]]
+        cur_streak = win_streak = loss_streak = 0
+        streak_type = results[-1] if results else 1
+        for r in reversed(results):
+            if r == streak_type:
+                cur_streak += 1
+            else:
+                break
+        for r in results:
+            if r == 1:
+                win_streak += 1
+            else:
+                break
+        loss_run = 0
+        for r in results:
+            if r == -1:
+                loss_run += 1
+            else:
+                break
+
+        # Best / worst single trade
+        best_trade  = round(float(jdf["pnl"].max()), 2)
+        worst_trade = round(float(jdf["pnl"].min()), 2)
+
+        # Best / worst day
+        import pandas as pd
+        jdf["_date"] = pd.to_datetime(jdf["opened_at"]).dt.date
+        by_day = jdf.groupby("_date")["pnl"].sum()
+        best_day  = round(float(by_day.max()), 2) if len(by_day) else 0
+        worst_day = round(float(by_day.min()), 2) if len(by_day) else 0
+
+        # Avg R
+        avg_r = round(float(jdf["r_multiple"].mean()), 2) if len(jdf) else 0
 
         return {
-            "trades": jdf.to_dict("records"),
-            "equity_curve": [round(v, 2) for v in cum_pnl.iloc[::-1].values],
+            "trades": jdf.drop(columns=["_date"]).to_dict("records"),
+            "equity_curve": [round(v, 2) for v in cum_pnl.values],
             "stats": {
-                "total_trades": len(jdf),
-                "win_rate":     round(len(wins)/len(jdf), 3),
-                "total_pnl":    round(float(jdf["pnl"].sum()), 2),
-                "avg_win":      round(float(wins["pnl"].mean()), 2) if len(wins)  else 0,
-                "avg_loss":     round(float(losses["pnl"].mean()), 2) if len(losses) else 0,
+                "total_trades":  len(jdf),
+                "win_rate":      round(len(wins)/len(jdf), 3),
+                "total_pnl":     round(float(jdf["pnl"].sum()), 2),
+                "avg_win":       round(float(wins["pnl"].mean()), 2)   if len(wins)   else 0,
+                "avg_loss":      round(float(losses["pnl"].mean()), 2) if len(losses) else 0,
                 "profit_factor": (
                     round(float(wins["pnl"].sum()) / abs(float(losses["pnl"].sum())), 3)
                     if losses["pnl"].sum() != 0 else 9999
                 ),
+                "avg_r":         avg_r,
+                "best_trade":    best_trade,
+                "worst_trade":   worst_trade,
+                "best_day":      best_day,
+                "worst_day":     worst_day,
+                "current_streak": cur_streak,
+                "streak_type":   "win" if streak_type == 1 else "loss",
             },
         }
     except Exception as e:

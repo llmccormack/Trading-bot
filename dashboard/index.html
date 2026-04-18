@@ -3303,16 +3303,25 @@ async function loadJournal() {
       ${tradeRows}`;
   }).join('');
 
+  const streakCls = s.streak_type === 'win' ? 'green' : 'red';
+  const streakLabel = `${s.current_streak} ${s.streak_type === 'win' ? 'W' : 'L'} Streak`;
+
   wrap.innerHTML = `
     <!-- Stats row -->
     <div class="section-label" style="margin-bottom:12px;">PERFORMANCE SUMMARY</div>
-    <div class="metrics-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:20px;">
+    <div class="metrics-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:12px;">
       <div class="metric-card"><div class="m-label">Trades</div><div class="m-value">${s.total_trades}</div></div>
       <div class="metric-card ${wrCls}"><div class="m-label">Win Rate</div><div class="m-value">${fmtPct(s.win_rate)}</div></div>
       <div class="metric-card ${pnlCls}"><div class="m-label">Total P&L</div><div class="m-value">${s.total_pnl>=0?'+':''}$${s.total_pnl.toFixed(2)}</div></div>
       <div class="metric-card ${pfCls}"><div class="m-label">Profit Factor</div><div class="m-value">${fmtPF(s.profit_factor)}</div></div>
       <div class="metric-card green"><div class="m-label">Avg Win</div><div class="m-value">+$${(s.avg_win||0).toFixed(2)}</div></div>
-      <div class="metric-card red"><div class="m-label">Avg Loss</div><div class="m-value">$${(s.avg_loss||0).toFixed(2)}</div></div>
+      <div class="metric-card red"><div class="m-label">Avg Loss</div><div class="m-value">-$${Math.abs(s.avg_loss||0).toFixed(2)}</div></div>
+      <div class="metric-card ${streakCls}"><div class="m-label">Current Streak</div><div class="m-value">${streakLabel}</div></div>
+      <div class="metric-card green"><div class="m-label">Best Day</div><div class="m-value">+$${(s.best_day||0).toFixed(2)}</div></div>
+      <div class="metric-card red"><div class="m-label">Worst Day</div><div class="m-value">-$${Math.abs(s.worst_day||0).toFixed(2)}</div></div>
+      <div class="metric-card"><div class="m-label">Avg R</div><div class="m-value">${(s.avg_r||0).toFixed(2)}R</div></div>
+      <div class="metric-card green"><div class="m-label">Best Trade</div><div class="m-value">+$${(s.best_trade||0).toFixed(2)}</div></div>
+      <div class="metric-card red"><div class="m-label">Worst Trade</div><div class="m-value">-$${Math.abs(s.worst_trade||0).toFixed(2)}</div></div>
     </div>
 
     <!-- Equity curve -->
