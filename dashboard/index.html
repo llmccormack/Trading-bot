@@ -2148,6 +2148,12 @@ async function apRefreshServerStatus() {
     if(tradedCount>0) {
       el.innerHTML += ` <span style="color:var(--orange);margin-left:4px;">${tradedCount} trade${tradedCount>1?'s':''} today</span>`;
     }
+    // VIX block warning
+    if(d.vix_blocked) {
+      el.innerHTML += ` <span style="color:var(--red);margin-left:6px;">⚠ VIX ${d.vix} — entries blocked</span>`;
+    } else if(d.vix > 0) {
+      el.innerHTML += ` <span style="color:var(--text-muted);margin-left:6px;">VIX ${d.vix}</span>`;
+    }
     // Sync toggle to server state on first load
     const toggle = document.getElementById('apArmedToggle');
     if(toggle && !toggle._synced) {

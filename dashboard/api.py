@@ -67,6 +67,44 @@ def _make_live_engine(sym: str):
 _AP_ET        = pytz.timezone("America/New_York")
 _AP_SYMBOLS   = ["NQ=F", "ES=F", "GC=F"]
 _AP_INTERVAL  = 5 * 60          # check every 5 minutes
+
+# ── VIX filter ────────────────────────────────────────────────────── #
+# If VIX >= this threshold at market open, skip all entries for the day.
+# Protects against high-volatility event days (e.g. tariff announcements).
+# TopStep daily loss limit is ~$2k — extreme VIX days blow through that.
+VIX_BLOCK_THRESHOLD = 25.0
+_VIX_CACHE: dict = {}   # {"date": str, "vix": float, "blocked": bool}
+
+def _get_vix_today() -> tuple[float, bool]:
+    """
+    Fetch today's VIX level once and cache it for the day.
+    Returns (vix_level, is_blocked).
+    """
+    today_str = datetime.now(_AP_ET).strftime("%Y-%m-%d")
+    if _VIX_CACHE.get("date") == today_str:
+        return _VIX_CACHE["vix"], _VIX_CACHE["blocked"]
+    try:
+        import yfinance as yf
+        vix_df = yf.download("^VIX", period="2d", interval="1d", progress=False)
+        vix = float(vix_df["Close"].iloc[-1])
+    except Exception as e:
+        _aplog.warning(f"VIX fetch failed: {e} — allowing trades")
+        return 0.0, False
+    blocked = vix >= VIX_BLOCK_THRESHOLD
+    _VIX_CACHE.update({"date": today_str, "vix": round(vix, 2), "blocked": blocked})
+    if blocked:
+        _aplog.warning(
+            f"VIX BLOCK: VIX={vix:.1f} >= {VIX_BLOCK_THRESHOLD} — "
+            f"no new entries today (extreme volatility)"
+        )
+        _phone(
+            title=f"VIX Block — No Trades Today",
+            body=f"VIX={vix:.1f} (threshold {VIX_BLOCK_THRESHOLD}). Too volatile — skipping entries.",
+            tags="warning",
+        )
+    else:
+        _aplog.info(f"VIX check OK: {vix:.1f} (threshold {VIX_BLOCK_THRESHOLD})")
+    return vix, blocked
 _AP_LOG       = Path(__file__).resolve().parent.parent / "autopilot.log"
 _AP_STATE_FILE = Path(__file__).resolve().parent.parent / "autopilot_state.json"
 _AP_ARMED     = True            # server-side autopilot starts armed by default
@@ -198,6 +236,12 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
 
             if not sig:
                 _aplog.info(f"SKIP {sym}: no A+ setup (score below threshold or outside entry window)")
+                continue
+
+            # ── VIX block: skip entries on extreme volatility days ─── #
+            _, vix_blocked = _get_vix_today()
+            if vix_blocked:
+                _aplog.info(f"SKIP {sym}: VIX block active — too volatile to trade today")
                 continue
 
             # Re-entry logic: allow 2nd entry only if first trade was stopped out
@@ -1191,12 +1235,16 @@ def save_settings(req: SettingsUpdate):
 
 @app.get("/api/autopilot/state")
 def ap_state():
+    vix_level, vix_blocked = _VIX_CACHE.get("vix", 0.0), _VIX_CACHE.get("blocked", False)
     return {
-        "armed":       _AP_ARMED,
-        "symbols":     _AP_SYMBOLS,
-        "interval_s":  _AP_INTERVAL,
+        "armed":        _AP_ARMED,
+        "symbols":      _AP_SYMBOLS,
+        "interval_s":   _AP_INTERVAL,
         "market_hours": _ap_is_market_hours(),
         "traded_today": _AP_TRADED_TODAY,
+        "vix":          vix_level,
+        "vix_blocked":  vix_blocked,
+        "vix_threshold": VIX_BLOCK_THRESHOLD,
     }
 
 @app.post("/api/autopilot/arm")
