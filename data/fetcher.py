@@ -1,11 +1,18 @@
 """Historical data fetcher — yfinance for free backtesting data, Polygon.io for production."""
 import threading
+import tempfile
 import pandas as pd
 import yfinance as yf
 from datetime import datetime, timedelta
 from typing import Literal
 import httpx
 from config import settings
+
+# Point yfinance cache to /tmp so it works in read-only cloud environments (Railway)
+try:
+    yf.set_tz_cache_location(tempfile.gettempdir())
+except Exception:
+    pass
 
 # yfinance is NOT thread-safe: parallel calls share internal state and produce
 # duplicate/merged columns. This lock ensures only one download runs at a time.
