@@ -518,7 +518,11 @@ _last_agg: dict = {}
 # ─────────────────────────────────────────────────────────────────────
 # HEALTH / INFO
 # ─────────────────────────────────────────────────────────────────────
-@app.get("/api/health")
+@app.api_route("/", methods=["GET", "HEAD"])
+def root():
+    return {"status": "ok"}
+
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat(), "paper": settings.is_paper}
 
