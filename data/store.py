@@ -9,9 +9,10 @@ from config import settings
 # when Streamlit reruns the script on multiple threads simultaneously
 _db_lock = threading.Lock()
 
-# Use an absolute path so the DB ends up in the project folder
-# regardless of which directory the server is launched from
-DB_PATH = str(Path(__file__).parent.parent / "trading_bot.duckdb")
+# Use Railway persistent volume if available, otherwise fall back to project folder
+import os
+_DATA_DIR = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", str(Path(__file__).parent.parent))
+DB_PATH = str(Path(_DATA_DIR) / "trading_bot.duckdb")
 _DB_PATH = DB_PATH  # backwards-compat alias
 
 

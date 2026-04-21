@@ -325,7 +325,7 @@ def _send_daily_summary(broker: "PaperBroker") -> None:
     try:
         import duckdb
         today = datetime.now(_AP_ET).strftime("%Y-%m-%d")
-        conn  = duckdb.connect(str(Path(__file__).resolve().parent.parent / "trading_bot.duckdb"))
+        conn  = duckdb.connect(DB_PATH)
         rows  = conn.execute("""
             SELECT pnl, direction, symbol, r_multiple FROM trade_journal
             WHERE closed_at::DATE = ?
