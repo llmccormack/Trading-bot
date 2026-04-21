@@ -249,17 +249,22 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                 _aplog.info(f"SKIP {sym}: VIX block active — too volatile to trade today")
                 continue
 
-            # Re-entry logic: allow 2nd entry only if first trade was stopped out
+            # Re-entry logic:
+            #   NQ: up to 2 trades/day regardless of outcome (backtested — improves PF)
+            #   All others: 1 trade/day, re-entry only after a loss
+            max_trades_today = 2 if root == "NQ" else 1
             with _AP_LOCK:
                 traded = _AP_TRADED_TODAY.get(sym, {})
             if traded.get("date") == today_str:
-                outcome = traded.get("outcome", "open")
-                if outcome in ("win", "open"):
-                    label = "trade still open" if outcome == "open" else "target hit earlier today"
-                    _aplog.info(f"SKIP {sym}: {label} — no re-entry")
+                trade_count = traded.get("count", 1)
+                outcome     = traded.get("outcome", "open")
+                if outcome == "open":
+                    _aplog.info(f"SKIP {sym}: trade still open — no re-entry")
                     continue
-                # outcome == "loss" → allow 2nd entry
-                _aplog.info(f"ALLOW re-entry {sym}: earlier trade stopped out, taking 2nd setup")
+                if trade_count >= max_trades_today:
+                    _aplog.info(f"SKIP {sym}: {trade_count} trade(s) already taken today (max {max_trades_today})")
+                    continue
+                _aplog.info(f"ALLOW re-entry {sym}: {trade_count} trade(s) done, taking setup #{trade_count + 1}")
 
             _aplog.info(
                 f"SIGNAL {sig['direction']} {sym} | entry={sig['entry']} "
@@ -289,7 +294,8 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             )
             if ok:
                 with _AP_LOCK:
-                    _AP_TRADED_TODAY[sym] = {"date": today_str, "outcome": "open"}
+                    prev_count = _AP_TRADED_TODAY.get(sym, {}).get("count", 0)
+                    _AP_TRADED_TODAY[sym] = {"date": today_str, "outcome": "open", "count": prev_count + 1}
                     _save_ap_state()
                 _aplog.info(f"TRADE OPENED {sym}: {msg} (id={pos.id if pos else '?'})")
                 _phone(
