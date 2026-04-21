@@ -58,7 +58,7 @@ def _make_live_engine(sym: str):
             min_adx=18.0, min_score=0.50, allow_short=False, rth_only=True,
         )
     return BacktestEngineAPlus(
-        min_adx=18.0, min_score=0.65, allow_short=False, require_macro_confirm=False,
+        min_adx=18.0, min_score=0.72, allow_short=False, require_macro_confirm=False,
     )
 
 # ─────────────────────────────────────────────────────────────────────
@@ -899,7 +899,7 @@ def run_backtest(req: BacktestRequest):
             engine = BacktestEngineAPlus(
                 max_bars=req.max_bars,
                 min_adx=req.min_adx,
-                min_score=max(req.min_score, 0.65),   # enforce minimum quality floor
+                min_score=max(req.min_score, 0.72),   # enforce minimum quality floor
                 allow_short=req.allow_short,
                 require_macro_confirm=False,
             )
