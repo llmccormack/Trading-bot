@@ -29,6 +29,7 @@ from data.store import init_db, DB_PATH, get_open_positions
 from backtesting.engine import BacktestEngine
 from backtesting.engine_5m import BacktestEngine5m, run_multi_market, FUTURES_UNIVERSE
 from backtesting.engine_aplus import BacktestEngineAPlus, APLUS_UNIVERSE
+from backtesting.engine_fade_rip import FadeTheRipEngine
 from utils.indicators import add_all, get_key_levels
 import duckdb
 
@@ -187,6 +188,10 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             cur_px = snap.get("last_price") if snap else None
             engine = _make_live_engine(sym)
             sig = engine.live_signal(df, current_price=cur_px)
+            # If A+ finds no long, check Fade the Rip for a short (index futures only)
+            if sig is None and sym not in _COMMODITY_SYMBOLS:
+                fade_engine = FadeTheRipEngine()
+                sig = fade_engine.live_signal(df, current_price=cur_px)
             # Auto-close stops/targets
             closed = broker.check_stops_and_targets(root, cur_px) if cur_px else []
             for msg in closed:
@@ -235,7 +240,7 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             sym, sig, root, cur_px = r["sym"], r["sig"], r["root"], r["cur_px"]
 
             if not sig:
-                _aplog.info(f"SKIP {sym}: no A+ setup (score below threshold or outside entry window)")
+                _aplog.info(f"SKIP {sym}: no setup (A+ long or Fade short — score below threshold or outside window)")
                 continue
 
             # ── VIX block: skip entries on extreme volatility days ─── #
