@@ -36,8 +36,8 @@ BIAS_CONFIRM_H, BIAS_CONFIRM_M = 10, 15   # earliest bar to read day bias
 
 # ── Strategy params ─────────────────────────────────────────────── #
 MIN_BOUNCE_BARS    = 2       # consecutive green bars needed to call it a bounce
-RSI_BOUNCE_LOW     = 50      # RSI floor for bounce (must be recovering)
-RSI_BOUNCE_HIGH    = 70      # RSI ceiling (not overbought yet)
+RSI_BOUNCE_LOW     = 52      # RSI floor for bounce (must be recovering) — tightened from 50 (backtest: NQ PF 5.05→5.91, ES PF 2.89→4.55)
+RSI_BOUNCE_HIGH    = 65      # RSI ceiling — tightened from 70 (avoids overextended bounces)
 VWAP_PROXIMITY_ATR = 0.6     # within X ATR of VWAP or EMA21 = "at the level"
 STOP_ATR_MULT      = 0.4     # stop above bounce high + X ATR
 T1_R               = 1.5     # first target in R
