@@ -78,6 +78,7 @@ class BacktestEngineAPlus:
         allow_short: bool  = False,   # longs-only default (trend-following bias on index futures)
         require_macro_confirm: bool = False,  # 10:15 candle confirms direction (strict — off by default)
         retest_tolerance: float = 0.5,        # ATR multiplier for retest zone (tight = high quality)
+        max_trades_per_day: int = 0,          # 0 = unlimited; 1 = one trade/day; 2 = two/day etc.
     ):
         self.max_bars              = max_bars
         self.atr_stop_cap          = atr_stop_cap
@@ -87,6 +88,7 @@ class BacktestEngineAPlus:
         self.allow_short           = allow_short
         self.require_macro_confirm = require_macro_confirm
         self.retest_tolerance      = retest_tolerance
+        self.max_trades_per_day    = max_trades_per_day
 
     # ─────────────────────────────────────────────────────────────── #
     # Public API                                                       #
@@ -101,10 +103,12 @@ class BacktestEngineAPlus:
         open_trade: dict | None = None
         equity = 0.0
         be_moved = False
+        _day_trade_count: dict[str, int] = {}   # date → trades taken that day
 
         for i in range(100, n):  # warmup=100 for rolling VWAP-85 + indicators
             bar_time_et = df["ts_et"].iloc[i]
             h, m = bar_time_et.hour, bar_time_et.minute
+            _day_key = bar_time_et.strftime("%Y-%m-%d")
 
             # ── Manage open trade ─────────────────────────────────── #
             if open_trade is not None:
@@ -198,6 +202,11 @@ class BacktestEngineAPlus:
             if direction == "SELL" and not self.allow_short:
                 continue
 
+            # Per-day trade limit (0 = unlimited)
+            if self.max_trades_per_day > 0:
+                if _day_trade_count.get(_day_key, 0) >= self.max_trades_per_day:
+                    continue
+
             open_trade = {
                 "entry_bar": i,
                 "dir":       1 if direction == "BUY" else -1,
@@ -209,6 +218,7 @@ class BacktestEngineAPlus:
                 "score":     score,
                 "regime":    regime,
             }
+            _day_trade_count[_day_key] = _day_trade_count.get(_day_key, 0) + 1
             be_moved = False
 
         return result
