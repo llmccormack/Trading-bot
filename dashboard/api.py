@@ -60,6 +60,7 @@ def _make_live_engine(sym: str):
         )
     return BacktestEngineAPlus(
         min_adx=18.0, min_score=0.75, allow_short=False, require_macro_confirm=False,
+        skip_monday=True, skip_power_hour_open=True,
     )
 
 # ─────────────────────────────────────────────────────────────────────
@@ -913,6 +914,8 @@ def run_backtest(req: BacktestRequest):
                 min_score=max(req.min_score, 0.75),   # enforce minimum quality floor
                 allow_short=req.allow_short,
                 require_macro_confirm=False,
+                skip_monday=True,
+                skip_power_hour_open=True,
             )
         elif req.engine == "5m":
             engine = BacktestEngine5m(

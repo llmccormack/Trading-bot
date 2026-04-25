@@ -79,6 +79,8 @@ class BacktestEngineAPlus:
         require_macro_confirm: bool = False,  # 10:15 candle confirms direction (strict — off by default)
         retest_tolerance: float = 0.5,        # ATR multiplier for retest zone (tight = high quality)
         max_trades_per_day: int = 0,          # 0 = unlimited; 1 = one trade/day; 2 = two/day etc.
+        skip_monday: bool = False,            # skip all entries on Monday (weak day historically)
+        skip_power_hour_open: bool = False,   # skip 14:00-14:30 (first 30 min of power hour)
     ):
         self.max_bars              = max_bars
         self.atr_stop_cap          = atr_stop_cap
@@ -89,6 +91,8 @@ class BacktestEngineAPlus:
         self.require_macro_confirm = require_macro_confirm
         self.retest_tolerance      = retest_tolerance
         self.max_trades_per_day    = max_trades_per_day
+        self.skip_monday           = skip_monday
+        self.skip_power_hour_open  = skip_power_hour_open
 
     # ─────────────────────────────────────────────────────────────── #
     # Public API                                                       #
@@ -177,6 +181,12 @@ class BacktestEngineAPlus:
                 open_trade = None
                 continue
 
+            # ── Day-of-week and time-of-day filters ───────────────── #
+            if self.skip_monday and bar_time_et.weekday() == 0:  # 0 = Monday
+                continue
+            if self.skip_power_hour_open and h == 14 and m < 30:
+                continue
+
             # ── Skip if outside entry windows ─────────────────────── #
             if not self._is_entry_window(h, m):
                 continue
@@ -234,6 +244,11 @@ class BacktestEngineAPlus:
         bar_time_utc = df["timestamp"].iloc[i]
         bar_time_et  = bar_time_utc.astimezone(ET)
         h, m = bar_time_et.hour, bar_time_et.minute
+
+        if self.skip_monday and bar_time_et.weekday() == 0:
+            return None
+        if self.skip_power_hour_open and h == 14 and m < 30:
+            return None
 
         if not self._is_entry_window(h, m):
             return None
@@ -468,12 +483,14 @@ class BacktestEngineAPlus:
             (h == 10 and m >= 15) or
             (h == 11 and m < 30)
         )
+        # Lunch continuation: 11:30 AM – 2:00 PM (same A+ filters apply — slower, steadier moves)
+        in_lunch = (h == 11 and m >= 30) or (h == 12) or (h == 13)
         # Power Hour: 2:00 PM – 3:55 PM
         in_power = (
             (h == 14) or
             (h == 15 and m < 55)
         )
-        return in_primary or in_power
+        return in_primary or in_lunch or in_power
 
     # ─────────────────────────────────────────────────────────────── #
     # Scoring                                                          #
