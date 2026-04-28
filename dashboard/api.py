@@ -6,6 +6,7 @@ Run with: uvicorn dashboard.api:app --reload --port 8000
 import sys, time, traceback, threading, logging
 from pathlib import Path
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 import pytz
 
@@ -190,7 +191,11 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             engine = _make_live_engine(sym)
             sig = engine.live_signal(df, current_price=cur_px)
             # If A+ finds no long, check Fade the Rip for a short (index futures only)
-            if sig is None and sym not in _COMMODITY_SYMBOLS:
+            # Apply same day/time guards as A+: skip Monday, skip power hour (14:00-14:30 ET)
+            _now_et = datetime.now(ZoneInfo("America/New_York"))
+            _is_monday = _now_et.weekday() == 0
+            _is_power_hour_open = _now_et.hour == 14 and _now_et.minute < 30
+            if sig is None and sym not in _COMMODITY_SYMBOLS and not _is_monday and not _is_power_hour_open:
                 fade_engine = FadeTheRipEngine()
                 sig = fade_engine.live_signal(df, current_price=cur_px)
             # Auto-close stops/targets
