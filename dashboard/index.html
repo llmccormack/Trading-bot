@@ -1323,6 +1323,10 @@ a:hover { color: var(--accent); }
       </div>
     </div>
     <span class="mode-badge paper" id="modeBadge">PAPER</span>
+    <span id="vixBadge" title="CBOE VIX — fear index. Block triggers at threshold." style="
+      display:none;margin-left:6px;font-size:9px;font-weight:700;letter-spacing:.6px;
+      padding:3px 7px;border-radius:4px;border:1px solid;cursor:default;
+    ">VIX —</span>
 
     <div class="header-sep"></div>
 
@@ -1427,7 +1431,7 @@ a:hover { color: var(--accent); }
           <span class="ap-sym-name">ES=F</span>
           <span class="ap-sym-sub">S&amp;P 500 · PF 1.58</span>
         </label>
-        <label class="ap-sym-toggle active" data-sym="GC=F" onclick="toggleApSym(this)">
+        <label class="ap-sym-toggle" data-sym="GC=F" onclick="toggleApSym(this)">
           <span class="ap-sym-name">GC=F</span>
           <span class="ap-sym-sub">Gold · PF 5.50 🏆</span>
         </label>
@@ -1468,11 +1472,55 @@ a:hover { color: var(--accent); }
       <div id="apServerStatus" style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--text-muted);margin-left:8px;padding:4px 10px;background:rgba(255,255,255,0.04);border-radius:6px;">
         <span>🖥 Server: loading…</span>
       </div>
+      <button id="topstepToggleBtn" onclick="toggleTopStepMode(true)" title="Enable TopStep Combine Mode" style="margin-left:auto;font-size:10px;padding:4px 12px;background:rgba(255,180,0,0.1);border:1px solid rgba(255,180,0,0.3);border-radius:6px;color:#FFB400;cursor:pointer;font-weight:600;white-space:nowrap;">🏆 Combine Mode</button>
     </div>
 
     <div id="apAlertBox"></div>
 
     <!-- Main layout: signal cards + activity log -->
+
+    <!-- TopStep Combine Mode Banner -->
+    <div id="topstepBanner" style="display:none;margin-bottom:14px;background:linear-gradient(135deg,rgba(255,180,0,0.12),rgba(255,140,0,0.08));border:1px solid rgba(255,180,0,0.35);border-radius:10px;padding:14px 18px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <div style="display:flex;align-items:center;gap:10px;">
+          <span style="font-size:18px;">🏆</span>
+          <div>
+            <div style="font-size:12px;font-weight:700;letter-spacing:.06em;color:#FFB400;text-transform:uppercase;">TopStep Combine Mode Active</div>
+            <div style="font-size:11px;color:var(--text-muted);">Score 0.75 · No shorts · VIX block 20 · $1k daily limit</div>
+          </div>
+        </div>
+        <button onclick="toggleTopStepMode(false)" style="font-size:10px;padding:4px 12px;background:rgba(255,180,0,0.15);border:1px solid rgba(255,180,0,0.4);border-radius:6px;color:#FFB400;cursor:pointer;font-weight:600;">Exit Combine Mode</button>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
+        <div>
+          <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Daily Loss Limit <span id="tsLossLabel" style="color:var(--text-primary);font-weight:600;"></span></div>
+          <div style="background:rgba(255,255,255,0.06);border-radius:4px;height:8px;overflow:hidden;">
+            <div id="tsLossBar" style="height:100%;width:0%;background:var(--green);border-radius:4px;transition:width .4s,background .4s;"></div>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Profit Target <span id="tsProfitLabel" style="color:var(--text-primary);font-weight:600;"></span></div>
+          <div style="background:rgba(255,255,255,0.06);border-radius:4px;height:8px;overflow:hidden;">
+            <div id="tsProfitBar" style="height:100%;width:0%;background:#FFB400;border-radius:4px;transition:width .4s;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Strategy performance panel -->
+    <div id="perfPanel" style="margin-bottom:18px;background:rgba(255,255,255,0.03);border:1px solid rgba(255,255,255,0.07);border-radius:10px;padding:14px 18px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+        <span style="font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--text-muted);text-transform:uppercase;">30-Day Strategy Performance</span>
+        <button onclick="loadPerfPanel()" style="font-size:10px;padding:3px 10px;background:rgba(255,255,255,0.06);border:1px solid rgba(255,255,255,0.1);border-radius:4px;color:var(--text-muted);cursor:pointer;">↻ Refresh</button>
+      </div>
+      <div id="perfPanelRows" style="display:flex;flex-wrap:wrap;gap:8px;">
+        <span style="color:var(--text-muted);font-size:12px;">Loading…</span>
+      </div>
+      <!-- Rolling 10-trade live track record -->
+      <div id="perfPanelLiveRolling" style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);display:none;">
+      </div>
+    </div>
+
     <div id="apMainLayout" style="display:grid; grid-template-columns:1fr 340px; gap:20px; align-items:start;">
 
       <!-- Signal cards grid -->
@@ -1816,6 +1864,12 @@ a:hover { color: var(--accent); }
       </div>
     </div>
 
+    <!-- TopStep combine readiness (shown only when topstep_mode is on) -->
+    <div id="topstepReadinessPanel" style="display:none;margin-bottom:24px;padding:16px 18px;
+      background:linear-gradient(135deg,rgba(245,158,11,0.07) 0%,rgba(249,115,22,0.05) 100%);
+      border:1px solid rgba(245,158,11,0.2);border-radius:var(--radius-md);">
+    </div>
+
     <!-- Stats + history -->
     <div id="journalContent">
       <div class="empty-state">
@@ -2018,6 +2072,134 @@ function fmtPct(n) { return n==null ? '—' : (n*100).toFixed(1)+'%'; }
 function fmtPF(n) { return n>=9999 ? '∞' : fmtNum(n,2); }
 
 // ── Header / Portfolio ────────────────────────────────────────────
+async function loadTopStepState() {
+  try {
+    const r = await fetch(API + '/api/topstep/state');
+    const d = await r.json();
+    const banner = document.getElementById('topstepBanner');
+    const btn    = document.getElementById('topstepToggleBtn');
+    if (!banner) return;
+    if (d.enabled) {
+      banner.style.display = 'block';
+      if (btn) btn.style.display = 'none';
+      // Daily loss bar
+      const lossPct = Math.min(1, d.daily_loss_pct) * 100;
+      const lossBar = document.getElementById('tsLossBar');
+      const lossLabel = document.getElementById('tsLossLabel');
+      if (lossBar) {
+        lossBar.style.width = lossPct + '%';
+        lossBar.style.background = lossPct >= 100 ? 'var(--red)' : lossPct >= 70 ? '#f0b429' : 'var(--green)';
+      }
+      if (lossLabel) {
+        const used = Math.abs(d.today_pnl);
+        lossLabel.textContent = `$${used.toFixed(0)} / $${d.daily_loss_limit.toFixed(0)} (${(lossPct).toFixed(0)}%)`;
+        lossLabel.style.color = lossPct >= 100 ? 'var(--red)' : lossPct >= 70 ? '#f0b429' : 'var(--green)';
+      }
+      // Profit target bar
+      const profPct = Math.min(1, d.profit_progress) * 100;
+      const profBar = document.getElementById('tsProfitBar');
+      const profLabel = document.getElementById('tsProfitLabel');
+      if (profBar) profBar.style.width = profPct + '%';
+      if (profLabel) profLabel.textContent = `$${d.total_profit.toFixed(0)} / $${d.profit_target.toFixed(0)} (${profPct.toFixed(0)}%)`;
+    } else {
+      banner.style.display = 'none';
+      if (btn) btn.style.display = 'block';
+    }
+  } catch(e) {}
+}
+
+async function toggleTopStepMode(enable) {
+  if (enable) {
+    const ok = confirm(
+      'Enable TopStep Combine Mode?\n\n' +
+      '  • Score threshold raised to 0.85\n' +
+      '  • Daily loss hard limit: $1,000\n' +
+      '  • VIX block lowered to 20\n' +
+      '  • Shorts (Fade the Rip) disabled\n\n' +
+      'Use this only when actively trading the TopStep combine.'
+    );
+    if (!ok) return;
+  }
+  try {
+    const r = await fetch(API + '/api/topstep/toggle', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: enable})
+    });
+    const d = await r.json();
+    if (d.ok) await loadTopStepState();
+  } catch(e) { alert('TopStep toggle failed: ' + e.message); }
+}
+
+async function loadPerfPanel() {
+  const el = document.getElementById('perfPanelRows');
+  if (!el) return;
+  el.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">Loading…</span>';
+  try {
+    const [snapRes, journalRes] = await Promise.all([
+      fetch(API+'/api/performance/snapshot'),
+      fetch(API+'/api/journal'),
+    ]);
+    const d = await snapRes.json();
+    const journal = await journalRes.json();
+
+    // ── Strategy performance cards ─────────────────────────────── //
+    if (!d.results || !d.results.length) {
+      el.innerHTML = '<span style="color:var(--text-muted);font-size:12px;">No data</span>';
+    } else {
+      el.innerHTML = d.results.map(p => {
+        const pfColor = p.pf >= 2.0 ? 'var(--green)' : p.pf >= 1.2 ? '#f0b429' : 'var(--red)';
+        const wrColor = p.wr >= 55 ? 'var(--green)' : p.wr >= 40 ? '#f0b429' : 'var(--red)';
+        return '<div style="background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.07);border-radius:7px;padding:8px 12px;min-width:160px;">'
+          + '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">' + p.symbol + ' · ' + p.strategy + '</div>'
+          + '<div style="display:flex;gap:10px;align-items:baseline;">'
+          + '<span style="font-size:15px;font-weight:700;color:' + pfColor + ';">PF ' + p.pf + '</span>'
+          + '<span style="font-size:12px;color:' + wrColor + ';">' + p.wr + '% WR</span>'
+          + '<span style="font-size:11px;color:var(--text-muted);">' + p.trades + 'T</span>'
+          + '</div>'
+          + '<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">' + (p.total_r > 0 ? '+' : '') + p.total_r + 'R · 30d</div>'
+          + '</div>';
+      }).join('');
+    }
+
+    // ── Rolling 10-trade live track record ─────────────────────── //
+    const rlvEl = document.getElementById('perfPanelLiveRolling');
+    if (rlvEl && journal.trades && journal.trades.length > 0) {
+      const last10 = journal.trades.slice(0, 10);
+      const dots   = last10.map(t => {
+        const win = (t.pnl || 0) > 0;
+        return '<span title="' + (t.symbol||'') + ' ' + (win?'WIN':'LOSS') + ' ' + (t.pnl>=0?'+':'') + '$' + (t.pnl||0).toFixed(0) + '"'
+          + ' style="font-size:14px;color:' + (win ? 'var(--green)' : 'var(--red)') + ';line-height:1;">●</span>';
+      }).join('');
+      const wins10 = last10.filter(t => (t.pnl || 0) > 0).length;
+      const wr10   = Math.round(wins10 / last10.length * 100);
+      const wr10Color = wr10 >= 60 ? 'var(--green)' : wr10 >= 45 ? '#f0b429' : 'var(--red)';
+      const streak = _computeStreak(last10);
+      rlvEl.style.display = 'block';
+      rlvEl.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">'
+        + '<span style="font-size:9px;font-weight:600;letter-spacing:.08em;color:var(--text-muted);text-transform:uppercase;white-space:nowrap;">Live Track Record</span>'
+        + '<div style="display:flex;gap:3px;align-items:center;">' + dots + '</div>'
+        + '<span style="font-size:12px;font-weight:700;color:' + wr10Color + ';">' + wr10 + '% WR</span>'
+        + '<span style="font-size:10px;color:var(--text-muted);">last ' + last10.length + ' trades</span>'
+        + (streak.len >= 3 ? '<span style="font-size:10px;padding:2px 7px;border-radius:4px;background:' + (streak.type==='win'?'rgba(34,197,94,0.12)':'rgba(239,68,68,0.12)') + ';color:' + (streak.type==='win'?'var(--green)':'var(--red)') + ';font-weight:600;">' + streak.len + (streak.type==='win'?' W streak':' L streak') + '</span>' : '')
+        + '</div>';
+    } else if (rlvEl) {
+      rlvEl.style.display = 'none';
+    }
+  } catch(e) { el.innerHTML = '<span style="color:var(--red);font-size:12px;">Error: ' + e.message + '</span>'; }
+}
+
+function _computeStreak(trades) {
+  if (!trades || !trades.length) return {len:0, type:'win'};
+  const first = (trades[0].pnl || 0) > 0 ? 'win' : 'loss';
+  let len = 1;
+  for (let i = 1; i < trades.length; i++) {
+    const cur = (trades[i].pnl || 0) > 0 ? 'win' : 'loss';
+    if (cur === first) len++; else break;
+  }
+  return {len, type: first};
+}
+
 async function loadPortfolio() {
   try {
     const r = await fetch(API+'/api/portfolio');
@@ -2403,7 +2585,7 @@ function renderApLog() {
 
 async function loadServerLog() {
   try {
-    const res = await fetch(API + '/api/ap-log?lines=100');
+    const res = await fetch(API + '/api/autopilot/log?lines=100');
     const data = await res.json();
     const lines = (data.lines || []).reverse();
     lines.forEach(line => {
@@ -2776,6 +2958,7 @@ async function executeTrade(symbol, direction, entry, stop, target, strategy) {
 }
 
 async function closePosition(id, price) {
+  if (!confirm('Close this position manually?\n\nThis cannot be undone.')) return;
   try {
     const r = await fetch(API+'/api/trade/close/'+id, {
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -3106,6 +3289,94 @@ function _progressBar(progress, direction) {
     </div>`;
 }
 
+function _strategyRows(stats) {
+  if (!stats || stats.length < 2) return '';
+  const LABELS = { aplus:'A+ IB Retest', orb:'ORB Breakout', vwap_pullback:'VWAP Pullback', fade_rip:'Fade the Rip' };
+  const rows = stats.map(st => {
+    const pnlColor = st.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    const pfColor  = st.profit_factor >= 1.5 ? 'var(--green)' : st.profit_factor >= 1.0 ? 'var(--gold)' : 'var(--red)';
+    const wrColor  = st.win_rate >= 0.55 ? 'var(--green)' : 'var(--red)';
+    const label    = LABELS[st.strategy] || st.strategy;
+    const pfStr    = st.profit_factor >= 9 ? '&infin;' : st.profit_factor.toFixed(2);
+    const rSign    = st.avg_r >= 0 ? '+' : '';
+    const pnlSign  = st.total_pnl >= 0 ? '+' : '';
+    return '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">'
+      + '<td style="padding:8px;font-weight:600;color:var(--text-primary);">' + label + '</td>'
+      + '<td style="text-align:right;padding:8px;color:var(--text-muted);">' + st.trades + '</td>'
+      + '<td style="text-align:right;padding:8px;color:' + wrColor + ';font-weight:600;">' + (st.win_rate*100).toFixed(0) + '%</td>'
+      + '<td style="text-align:right;padding:8px;color:' + pfColor + ';font-weight:600;">' + pfStr + '</td>'
+      + '<td style="text-align:right;padding:8px;color:var(--text-muted);">' + rSign + st.avg_r.toFixed(2) + 'R</td>'
+      + '<td style="text-align:right;padding:8px;font-weight:700;color:' + pnlColor + ';">' + pnlSign + '$' + st.total_pnl.toFixed(0) + '</td>'
+      + '</tr>';
+  }).join('');
+  return '<div class="section-label" style="margin-bottom:10px;">STRATEGY BREAKDOWN</div>'
+    + '<div style="overflow-x:auto;margin-bottom:24px;">'
+    + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
+    + '<thead><tr style="color:var(--text-muted);border-bottom:1px solid var(--border);">'
+    + '<th style="text-align:left;padding:6px 8px;font-weight:600;">Strategy</th>'
+    + '<th style="text-align:right;padding:6px 8px;font-weight:600;">Trades</th>'
+    + '<th style="text-align:right;padding:6px 8px;font-weight:600;">WR</th>'
+    + '<th style="text-align:right;padding:6px 8px;font-weight:600;">PF</th>'
+    + '<th style="text-align:right;padding:6px 8px;font-weight:600;">Avg R</th>'
+    + '<th style="text-align:right;padding:6px 8px;font-weight:600;">P&amp;L</th>'
+    + '</tr></thead>'
+    + '<tbody>' + rows + '</tbody></table></div>';
+}
+
+function _weekGrid(trades) {
+  if (!trades || trades.length < 2) return '';
+  // Group trades by the Monday of their week
+  function weekMonday(date) {
+    const d = new Date(date);
+    const day = d.getDay(); // 0=Sun
+    const diff = day === 0 ? -6 : 1 - day;
+    d.setDate(d.getDate() + diff);
+    d.setHours(0,0,0,0);
+    return d;
+  }
+  const byWeek = {};
+  trades.forEach(t => {
+    if (!t.opened_at) return;
+    const mon  = weekMonday(new Date(t.opened_at));
+    const key  = mon.toISOString().slice(0,10);
+    if (!byWeek[key]) byWeek[key] = {mon, pnl:0, wins:0, n:0};
+    byWeek[key].n++;
+    byWeek[key].pnl += (t.pnl || 0);
+    if ((t.pnl || 0) > 0) byWeek[key].wins++;
+  });
+  const keys = Object.keys(byWeek).sort((a,b) => b.localeCompare(a));
+  if (keys.length < 2) return '';  // only show if ≥2 weeks of data
+  const rows = keys.map(k => {
+    const w = byWeek[k];
+    const fri = new Date(w.mon); fri.setDate(fri.getDate() + 4);
+    const label = w.mon.toLocaleDateString('en-US',{month:'short',day:'numeric'})
+                + ' – ' + fri.toLocaleDateString('en-US',{month:'short',day:'numeric'});
+    const wr   = w.n > 0 ? Math.round(w.wins/w.n*100) : 0;
+    const wrC  = wr >= 60 ? 'var(--green)' : wr >= 45 ? '#f0b429' : 'var(--red)';
+    const pC   = w.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    return '<tr style="border-bottom:1px solid rgba(255,255,255,0.04);">'
+      + '<td style="padding:6px 10px;font-size:11px;color:var(--text-muted);">' + label + '</td>'
+      + '<td style="padding:6px 8px;text-align:center;font-size:11px;">' + w.n + '</td>'
+      + '<td style="padding:6px 8px;text-align:center;font-size:11px;color:var(--green);">' + w.wins + '</td>'
+      + '<td style="padding:6px 8px;text-align:center;font-size:11px;color:var(--red);">' + (w.n-w.wins) + '</td>'
+      + '<td style="padding:6px 8px;text-align:center;font-size:11px;font-weight:600;color:'+wrC+';">' + wr + '%</td>'
+      + '<td style="padding:6px 8px;text-align:right;font-size:12px;font-weight:700;color:'+pC+';">'
+      + (w.pnl>=0?'+':'') + '$' + Math.abs(w.pnl).toFixed(0) + '</td>'
+      + '</tr>';
+  }).join('');
+  return '<div class="section-label" style="margin-bottom:6px;">WEEKLY PERFORMANCE</div>'
+    + '<div style="overflow-x:auto;margin-bottom:24px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:8px;">'
+    + '<table style="width:100%;border-collapse:collapse;font-size:11px;">'
+    + '<thead><tr style="border-bottom:1px solid var(--border);">'
+    + '<th style="padding:7px 10px;text-align:left;font-size:9px;letter-spacing:.06em;color:var(--text-muted);text-transform:uppercase;">Week</th>'
+    + '<th style="padding:7px 8px;text-align:center;font-size:9px;letter-spacing:.06em;color:var(--text-muted);text-transform:uppercase;">Trades</th>'
+    + '<th style="padding:7px 8px;text-align:center;font-size:9px;letter-spacing:.06em;color:var(--green);text-transform:uppercase;">W</th>'
+    + '<th style="padding:7px 8px;text-align:center;font-size:9px;letter-spacing:.06em;color:var(--red);text-transform:uppercase;">L</th>'
+    + '<th style="padding:7px 8px;text-align:center;font-size:9px;letter-spacing:.06em;color:var(--text-muted);text-transform:uppercase;">WR%</th>'
+    + '<th style="padding:7px 8px;text-align:right;font-size:9px;letter-spacing:.06em;color:var(--text-muted);text-transform:uppercase;">P&amp;L</th>'
+    + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+}
+
 async function loadJournal() {
   const [portRes, journalRes] = await Promise.all([
     fetch(API+'/api/portfolio'),
@@ -3113,6 +3384,63 @@ async function loadJournal() {
   ]);
   const port    = await portRes.json();
   const journal = await journalRes.json();
+
+  // ── TOPSTEP COMBINE READINESS ──────────────────────────────────
+  const tsPanel = document.getElementById('topstepReadinessPanel');
+  if(tsPanel) {
+    const ts = journal.topstep_readiness;
+    if(ts) {
+      const profitPct  = Math.min(ts.combine_profit / ts.profit_target * 100, 100);
+      const profitPctD = Math.max(profitPct, 0).toFixed(1);
+      const profitColor = ts.profit_met ? 'var(--green)' : profitPct > 50 ? 'var(--gold)' : 'var(--accent)';
+      const checks = [
+        { label: `Profit: $${ts.combine_profit >= 0 ? '+' : ''}${ts.combine_profit.toFixed(0)} / $${ts.profit_target.toFixed(0)}`, met: ts.profit_met },
+        { label: `Days traded: ${ts.days_traded} / 10 minimum`, met: ts.days_met },
+        { label: `Win rate: ${(ts.win_rate*100).toFixed(1)}% / 55%+ preferred`, met: ts.wr_met },
+        { label: `Max daily loss: $${ts.worst_day.toFixed(0)} / -$${ts.daily_loss_limit.toFixed(0)} limit`, met: ts.daily_loss_met },
+      ];
+      const allMet = checks.every(c => c.met);
+      tsPanel.style.display = 'block';
+      tsPanel.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+          <div class="section-label" style="margin:0;">TOPSTEP COMBINE READINESS</div>
+          <span style="font-size:11px;font-weight:700;color:${allMet?'var(--green)':'var(--gold)'};">
+            ${allMet ? '✅ READY TO SUBMIT' : '⏳ Building track record'}
+          </span>
+        </div>
+        <!-- Profit progress bar -->
+        <div style="margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:4px;">
+            <span>Profit toward $${(ts.profit_target/1000).toFixed(0)}k target</span>
+            <span style="color:${profitColor};font-weight:700;">${profitPctD}%</span>
+          </div>
+          <div style="height:8px;background:rgba(255,255,255,0.06);border-radius:4px;overflow:hidden;">
+            <div style="height:100%;width:${Math.max(profitPctD,0)}%;background:${profitColor};border-radius:4px;
+              transition:width .4s;"></div>
+          </div>
+          <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px;">
+            <span>$0</span><span>$${(ts.profit_target/1000).toFixed(0)}k</span>
+          </div>
+        </div>
+        <!-- Checklist -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
+          ${checks.map(c => `
+            <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;
+              background:${c.met?'rgba(34,197,94,0.06)':'rgba(255,255,255,0.03)'};
+              border:1px solid ${c.met?'rgba(34,197,94,0.2)':'var(--border)'};border-radius:6px;">
+              <span style="font-size:14px;">${c.met?'✅':'⏳'}</span>
+              <span style="font-size:11px;color:${c.met?'var(--text-primary)':'var(--text-muted)'};">${c.label}</span>
+            </div>`).join('')}
+        </div>
+        ${allMet ? `
+          <div style="margin-top:12px;padding:10px 14px;background:rgba(34,197,94,0.08);
+            border:1px solid rgba(34,197,94,0.25);border-radius:8px;font-size:12px;color:var(--green);text-align:center;">
+            All requirements met — you can submit your combine for review
+          </div>` : ''}`;
+    } else {
+      tsPanel.style.display = 'none';
+    }
+  }
 
   // ── OPEN POSITIONS ──────────────────────────────────────────────
   const posPanel = document.getElementById('openPositionsPanel');
@@ -3260,29 +3588,35 @@ async function loadJournal() {
         dur = mins < 60 ? `${mins}m` : `${Math.floor(mins/60)}h ${mins%60}m`;
       }
       const win = pnl > 0;
+      const STRAT_LABELS = {aplus:'A+', orb:'ORB', vwap_pullback:'VWAP', fade_rip:'Fade'};
+      const stratLabel = STRAT_LABELS[t.strategy_used] || (t.strategy_used||'').slice(0,6);
+      const sc = t.composite_score != null ? parseFloat(t.composite_score) : null;
+      const scColor = sc == null ? 'var(--text-muted)' : sc >= 0.80 ? 'var(--green)' : sc >= 0.70 ? '#f0b429' : 'var(--text-muted)';
       return `
-        <div style="display:flex;align-items:center;gap:12px;padding:10px 14px;
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
           border-radius:8px;background:${win?'rgba(34,197,94,0.04)':'rgba(239,68,68,0.04)'};
           border:1px solid ${win?'rgba(34,197,94,0.12)':'rgba(239,68,68,0.12)'};margin-bottom:6px;">
           <!-- Time -->
-          <div style="min-width:44px;font-size:10px;color:var(--text-muted);">${timeStr}</div>
-          <!-- Symbol + direction -->
-          <div style="min-width:80px;display:flex;align-items:center;gap:6px;">
+          <div style="min-width:40px;font-size:10px;color:var(--text-muted);">${timeStr}</div>
+          <!-- Symbol + direction + strategy + score -->
+          <div style="min-width:100px;display:flex;align-items:center;gap:5px;flex-wrap:wrap;">
             <span style="font-weight:800;font-size:13px;">${t.symbol}</span>
-            <span class="pill ${isLong?'pill-green':'pill-red'}" style="font-size:9px;">${isLong?'LONG':'SHORT'}</span>
+            <span class="pill ${isLong?'pill-green':'pill-red'}" style="font-size:9px;">${isLong?'L':'S'}</span>
+            <span style="font-size:9px;color:var(--text-muted);font-weight:600;">${stratLabel}</span>
+            ${sc != null ? '<span style="font-size:9px;color:'+scColor+';font-weight:700;">'+sc.toFixed(2)+'</span>' : ''}
           </div>
-          <!-- Entry → Exit -->
+          <!-- Entry → Exit + duration -->
           <div style="flex:1;font-size:11px;color:var(--text-muted);">
             ${(t.entry_price||0).toFixed(2)} → ${(t.exit_price||0).toFixed(2)}
             <span style="margin-left:6px;color:var(--text-dim);font-size:10px;">⏱ ${dur}</span>
           </div>
           <!-- R multiple -->
-          <div style="min-width:40px;text-align:right;font-size:11px;color:${r>=0?'var(--green)':'var(--red)'};">
+          <div style="min-width:42px;text-align:right;font-size:11px;font-weight:600;color:${r>=0?'var(--green)':'var(--red)'};">
             ${r>=0?'+':''}${r.toFixed(2)}R
           </div>
           <!-- P&L -->
-          <div style="min-width:80px;text-align:right;font-weight:700;font-size:14px;color:${pnl>=0?'var(--green)':'var(--red)'};">
-            ${pnl>=0?'+':''}$${pnl.toFixed(2)}
+          <div style="min-width:76px;text-align:right;font-weight:700;font-size:14px;color:${pnl>=0?'var(--green)':'var(--red)'};">
+            ${pnl>=0?'+':''}$${Math.abs(pnl).toFixed(0)}
           </div>
         </div>`;
     }).join('');
@@ -3324,8 +3658,19 @@ async function loadJournal() {
       <div class="metric-card red"><div class="m-label">Worst Trade</div><div class="m-value">-$${Math.abs(s.worst_trade||0).toFixed(2)}</div></div>
     </div>
 
+    <!-- Per-strategy breakdown (rendered by _strategyRows helper below) -->
+    ${_strategyRows(journal.strategy_stats)}
+
+    <!-- Week-by-week performance grid -->
+    ${_weekGrid(journal.trades)}
+
     <!-- Equity curve -->
-    <div id="journalChart" style="height:180px;margin-bottom:24px;"></div>
+    <div class="section-label" style="margin-bottom:6px;">EQUITY CURVE</div>
+    <div id="journalChart" style="height:160px;margin-bottom:20px;"></div>
+
+    <!-- Daily P&L bar chart -->
+    <div class="section-label" style="margin-bottom:6px;">DAILY P&amp;L</div>
+    <div id="journalDailyChart" style="height:140px;margin-bottom:24px;"></div>
 
     <!-- Trade history grouped by day -->
     <div class="section-label" style="margin-bottom:4px;">TRADE HISTORY</div>
@@ -3341,12 +3686,34 @@ async function loadJournal() {
       fillcolor: last>=0 ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)',
       line:{color:eqColor,width:2},
     }], {
-      height:180, template:'plotly_dark',
+      height:160, template:'plotly_dark',
       paper_bgcolor:'#060810', plot_bgcolor:'#0a0d16',
-      showlegend:false, margin:{l:55,r:20,t:8,b:24},
+      showlegend:false, margin:{l:55,r:20,t:4,b:24},
       font:{size:9,color:'#4a556e'},
       xaxis:{gridcolor:'#0e1220',title:'Trade #'},
       yaxis:{gridcolor:'#0e1220',title:'P&L ($)', tickprefix:'$'},
+    },{displayModeBar:false});
+  }
+
+  // Daily P&L bar chart
+  const dp = journal.daily_pnl || [];
+  if(dp.length > 0) {
+    const dpDates  = dp.map(d => d.date.slice(5)); // MM-DD
+    const dpValues = dp.map(d => d.pnl);
+    const dpColors = dpValues.map(v => v >= 0 ? 'rgba(34,197,94,0.75)' : 'rgba(239,68,68,0.75)');
+    const dpText   = dp.map(d => (d.pnl >= 0 ? '+' : '') + '$' + d.pnl.toFixed(0) + ' (' + d.trades + ' trades)');
+    Plotly.newPlot('journalDailyChart', [{
+      x: dpDates, y: dpValues, type: 'bar',
+      marker: { color: dpColors },
+      text: dpText, hoverinfo: 'text',
+    }], {
+      height:140, template:'plotly_dark',
+      paper_bgcolor:'#060810', plot_bgcolor:'#0a0d16',
+      showlegend:false, margin:{l:55,r:20,t:4,b:30},
+      font:{size:9,color:'#4a556e'},
+      xaxis:{gridcolor:'#0e1220'},
+      yaxis:{gridcolor:'#0e1220',title:'P&L ($)', tickprefix:'$',
+             zeroline:true, zerolinecolor:'rgba(255,255,255,0.15)', zerolinewidth:1},
     },{displayModeBar:false});
   }
 }
@@ -3424,6 +3791,36 @@ async function saveSettings() {
   btn.disabled = false; btn.textContent = '💾 Save Settings';
 }
 
+// ── VIX badge ─────────────────────────────────────────────────────
+async function loadVixBadge() {
+  try {
+    const d = await fetch(API+'/api/vix').then(r=>r.json());
+    const badge = document.getElementById('vixBadge');
+    if(!badge) return;
+    if(!d || d.vix === 0) { badge.style.display='none'; return; }
+    const blocked   = d.blocked;
+    const threshold = d.threshold;
+    badge.style.display = 'inline-block';
+    badge.textContent   = `VIX ${d.vix.toFixed(1)}`;
+    if(blocked) {
+      badge.style.background   = 'rgba(239,68,68,0.15)';
+      badge.style.color        = 'var(--red)';
+      badge.style.borderColor  = 'rgba(239,68,68,0.4)';
+      badge.title = `VIX ${d.vix.toFixed(1)} \u2265 ${threshold} — trading BLOCKED today`;
+    } else if(d.vix >= threshold * 0.85) {
+      badge.style.background   = 'rgba(245,158,11,0.12)';
+      badge.style.color        = 'var(--gold)';
+      badge.style.borderColor  = 'rgba(245,158,11,0.35)';
+      badge.title = `VIX ${d.vix.toFixed(1)} — elevated, approaching block threshold (${threshold})`;
+    } else {
+      badge.style.background   = 'rgba(34,197,94,0.08)';
+      badge.style.color        = 'var(--green)';
+      badge.style.borderColor  = 'rgba(34,197,94,0.25)';
+      badge.title = `VIX ${d.vix.toFixed(1)} — normal, block threshold ${threshold}`;
+    }
+  } catch(e) {}
+}
+
 // ── Init ─────────────────────────────────────────────────────────
 window.addEventListener('load', ()=>{
   loadPortfolio();
@@ -3432,11 +3829,17 @@ window.addEventListener('load', ()=>{
   apRefreshServerStatus();
   apPollServerLog();
   loadServerLog();
-  // Refresh portfolio every 30s, tickers every 15s, server status every 60s
+  loadPerfPanel();  // strategy performance snapshot
+  loadTopStepState(); // TopStep combine mode state
+  loadVixBadge();   // VIX header badge
+  // Refresh portfolio every 30s, tickers every 15s, server status every 60s, perf every 10min
   setInterval(loadPortfolio, 30000);
   setInterval(loadAllTickers, 15000);
   setInterval(apRefreshServerStatus, 60000);
   setInterval(apPollServerLog, 60000);
+  setInterval(loadPerfPanel, 600000);
+  setInterval(loadTopStepState, 30000);  // refresh TopStep state every 30s
+  setInterval(loadVixBadge, 300000);    // VIX refreshes every 5 min (cached server-side daily)
 
   // ── Wake Lock: keep screen alive on mobile so polling never stops ──
   let _wakeLock = null;

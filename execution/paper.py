@@ -69,18 +69,19 @@ class PaperBroker:
         try:
             conn = duckdb.connect(self.db_path)
 
-            # Restore account balance: starting capital + all historical realized P&L
+            # Restore account balance from trade_journal — this table captures ALL exits
+            # including partial T1 scale-outs that positions.realized_pnl misses.
+            # Using trade_journal gives an accurate running account balance on restart.
             pnl_row = conn.execute(
-                "SELECT COALESCE(SUM(realized_pnl), 0.0) FROM positions WHERE status = 'CLOSED'"
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM trade_journal"
             ).fetchone()
-            if pnl_row:
+            if pnl_row is not None:
                 self.account_balance = settings.paper_account_size + float(pnl_row[0])
 
-            # Restore today's daily P&L so the Day P&L display is correct after a restart
+            # Restore today's daily P&L so the risk manager's daily-loss guard is accurate
             today_pnl_row = conn.execute("""
-                SELECT COALESCE(SUM(realized_pnl), 0.0) FROM positions
-                WHERE status = 'CLOSED'
-                  AND closed_at >= current_date
+                SELECT COALESCE(SUM(pnl), 0.0) FROM trade_journal
+                WHERE closed_at::DATE = current_date
             """).fetchone()
             if today_pnl_row:
                 self.risk_manager._daily_realized_pnl = float(today_pnl_row[0])

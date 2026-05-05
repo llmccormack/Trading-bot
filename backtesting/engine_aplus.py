@@ -71,7 +71,7 @@ class BacktestEngineAPlus:
     def __init__(
         self,
         max_bars:    int   = 36,      # 3 hours on 5m
-        atr_stop_cap: float = 2.0,    # hard ATR cap on stop width
+        atr_stop_cap: float = 1.25,   # cap stop ATR multiplier (was 2.0 — now enforced)
         min_rr:      float = 1.8,     # skip trade if RR < this (T1 should be ~2R)
         min_adx:     float = 18.0,    # require trending market (ADX threshold)
         min_score:   float = 0.65,    # minimum quality score
@@ -81,6 +81,8 @@ class BacktestEngineAPlus:
         max_trades_per_day: int = 0,          # 0 = unlimited; 1 = one trade/day; 2 = two/day etc.
         skip_monday: bool = False,            # skip all entries on Monday (weak day historically)
         skip_power_hour_open: bool = False,   # skip 14:00-14:30 (first 30 min of power hour)
+        skip_power_hour: bool = False,        # skip ALL of power hour (14:00-15:55) — IB is stale by then
+        max_atr_multiple: float = 1.5,        # skip if current ATR > this × 20-bar avg ATR (spike filter)
     ):
         self.max_bars              = max_bars
         self.atr_stop_cap          = atr_stop_cap
@@ -93,6 +95,8 @@ class BacktestEngineAPlus:
         self.max_trades_per_day    = max_trades_per_day
         self.skip_monday           = skip_monday
         self.skip_power_hour_open  = skip_power_hour_open
+        self.skip_power_hour       = skip_power_hour
+        self.max_atr_multiple      = max_atr_multiple
 
     # ─────────────────────────────────────────────────────────────── #
     # Public API                                                       #
@@ -116,43 +120,72 @@ class BacktestEngineAPlus:
 
             # ── Manage open trade ─────────────────────────────────── #
             if open_trade is not None:
-                lo = df["low"].iloc[i]
-                hi = df["high"].iloc[i]
-                cl = df["close"].iloc[i]
+                lo      = float(df["low"].iloc[i])
+                hi      = float(df["high"].iloc[i])
+                cl      = float(df["close"].iloc[i])
+                atr_now = float(df["atr"].iloc[i])
 
-                # Breakeven: move stop to entry once T1 is touched
-                if not be_moved:
-                    t1 = open_trade["t1"]
-                    if (open_trade["dir"] == 1 and hi >= t1) or \
-                       (open_trade["dir"] == -1 and lo <= t1):
-                        open_trade["sl"] = open_trade["entry"]
-                        be_moved = True
+                eod     = (h == EOD_H and m >= EOD_M) or (h > EOD_H)
+                timeout = (i - open_trade["entry_bar"]) >= self.max_bars
 
-                # EOD force-close
-                eod = (h == EOD_H and m >= EOD_M) or (h > EOD_H)
+                # ── Trailing stop mode (after T2 broken through) ──── #
+                if open_trade.get("t2_hit", False):
+                    trail_sl = open_trade["trail_sl"]
+                    if open_trade["dir"] == 1:
+                        open_trade["trail_sl"] = max(trail_sl, hi - 0.8 * atr_now)
+                    else:
+                        open_trade["trail_sl"] = min(trail_sl, lo + 0.8 * atr_now)
+                    trail_sl = open_trade["trail_sl"]
+                    hit_trail = (open_trade["dir"] == 1 and lo <= trail_sl) or \
+                                (open_trade["dir"] == -1 and hi >= trail_sl)
+                    if hit_trail:
+                        exit_px, reason = trail_sl, "trail_stop"
+                    elif eod:
+                        exit_px, reason = cl, "eod"
+                    elif timeout:
+                        exit_px, reason = cl, "timeout"
+                    else:
+                        continue
 
-                # Check exits
-                hit_t2   = (open_trade["dir"] ==  1 and hi >= open_trade["t2"]) or \
-                           (open_trade["dir"] == -1 and lo <= open_trade["t2"])
-                hit_t1   = (open_trade["dir"] ==  1 and hi >= open_trade["t1"]) or \
-                           (open_trade["dir"] == -1 and lo <= open_trade["t1"])
-                hit_stop = (open_trade["dir"] ==  1 and lo <= open_trade["sl"]) or \
-                           (open_trade["dir"] == -1 and hi >= open_trade["sl"])
-                timeout  = (i - open_trade["entry_bar"]) >= self.max_bars
-
-                if hit_stop:
-                    exit_px, reason = open_trade["sl"], "stop"
-                elif hit_t2:
-                    exit_px, reason = open_trade["t2"], "target2"
-                elif hit_t1 and be_moved:
-                    # T1 hit AFTER BE move — exit the runner
-                    exit_px, reason = open_trade["t1"], "target1"
-                elif eod:
-                    exit_px, reason = cl, "eod"
-                elif timeout:
-                    exit_px, reason = cl, "timeout"
+                # ── Normal management ─────────────────────────────── #
                 else:
-                    continue  # stay in trade
+                    # Breakeven: move stop to entry once T1 is touched
+                    if not be_moved:
+                        t1 = open_trade["t1"]
+                        if (open_trade["dir"] == 1 and hi >= t1) or \
+                           (open_trade["dir"] == -1 and lo <= t1):
+                            open_trade["sl"] = open_trade["entry"]
+                            be_moved = True
+
+                    hit_t2   = (open_trade["dir"] ==  1 and hi >= open_trade["t2"]) or \
+                               (open_trade["dir"] == -1 and lo <= open_trade["t2"])
+                    hit_t1   = (open_trade["dir"] ==  1 and hi >= open_trade["t1"]) or \
+                               (open_trade["dir"] == -1 and lo <= open_trade["t1"])
+                    hit_stop = (open_trade["dir"] ==  1 and lo <= open_trade["sl"]) or \
+                               (open_trade["dir"] == -1 and hi >= open_trade["sl"])
+
+                    # Priority: stop > T2 > T1 > eod > timeout
+                    if hit_stop:
+                        exit_px, reason = open_trade["sl"], "stop"
+                    elif hit_t2:
+                        # Only trail if price clearly breaks +1 ATR beyond T2
+                        _clear_break = (open_trade["dir"] == 1 and hi >= open_trade["t2"] + 1.0 * atr_now) or \
+                                       (open_trade["dir"] == -1 and lo <= open_trade["t2"] - 1.0 * atr_now)
+                        if _clear_break:
+                            open_trade["t2_hit"] = True
+                            open_trade["trail_sl"] = open_trade["t2"] - 0.8 * atr_now \
+                                if open_trade["dir"] == 1 else open_trade["t2"] + 0.8 * atr_now
+                            continue
+                        else:
+                            exit_px, reason = open_trade["t2"], "target2"
+                    elif hit_t1 and be_moved:
+                        exit_px, reason = open_trade["t1"], "target1"
+                    elif eod:
+                        exit_px, reason = cl, "eod"
+                    elif timeout:
+                        exit_px, reason = cl, "timeout"
+                    else:
+                        continue  # stay in trade
 
                 pnl  = (exit_px - open_trade["entry"]) * open_trade["dir"]
                 risk = abs(open_trade["entry"] - open_trade["sl_orig"])
@@ -227,6 +260,8 @@ class BacktestEngineAPlus:
                 "t2":        round(t2, 4),
                 "score":     score,
                 "regime":    regime,
+                "t2_hit":    False,
+                "trail_sl":  None,
             }
             _day_trade_count[_day_key] = _day_trade_count.get(_day_key, 0) + 1
             be_moved = False
@@ -324,6 +359,9 @@ class BacktestEngineAPlus:
 
         # ── 20-bar average volume (for volume confirmation bonus) ──── #
         df["vol_avg20"] = df["volume"].rolling(20).mean()
+
+        # ── 20-bar rolling average ATR (volatility baseline for spike filter) ── #
+        df["atr_avg20"] = df["atr"].rolling(20).mean()
 
         # ── ET timestamps ─────────────────────────────────────────── #
         df["ts_et"]   = pd.to_datetime(df["timestamp"]).dt.tz_convert(ET)
@@ -483,9 +521,11 @@ class BacktestEngineAPlus:
             (h == 10 and m >= 15) or
             (h == 11 and m < 30)
         )
-        # Lunch continuation: 11:30 AM – 2:00 PM (same A+ filters apply — slower, steadier moves)
+        # Lunch continuation: 11:30 AM – 2:00 PM
         in_lunch = (h == 11 and m >= 30) or (h == 12) or (h == 13)
-        # Power Hour: 2:00 PM – 3:55 PM
+        # Power Hour: 2:00 PM – 3:55 PM (disabled by skip_power_hour)
+        if self.skip_power_hour:
+            return in_primary or in_lunch
         in_power = (
             (h == 14) or
             (h == 15 and m < 55)
@@ -546,6 +586,25 @@ class BacktestEngineAPlus:
         # ADX trend filter — only trade in trending markets
         if np.isnan(adx) or adx < self.min_adx:
             return None
+
+        # Volatility spike filter: skip if ATR is unusually high vs its own 20-bar baseline.
+        # On extreme news/event days (tariff shocks, FOMC surprises), ATR can be 2-3× normal,
+        # which inflates stops to $1,800+ and makes the setup structurally unreliable.
+        atr_avg20 = float(df["atr_avg20"].iloc[i])
+        if not np.isnan(atr_avg20) and atr_avg20 > 0:
+            if atr > self.max_atr_multiple * atr_avg20:
+                return None   # volatility spike — structural stops not trustworthy
+
+        # IB range quality filter:
+        # Too narrow → opening had no conviction (choppy, no directional bias formed)
+        # Too wide   → extreme open (partially caught by ATR spike filter, double-check here)
+        ib_lo = float(df["ib_low"].iloc[i])
+        if not np.isnan(ib_lo) and not np.isnan(ib_hi):
+            ib_range = ib_hi - ib_lo
+            if ib_range < 0.25 * atr:    # doji-like open — no clear bias formed
+                return None
+            if ib_range > 3.0 * atr:     # extreme open — too much noise
+                return None
 
         # 1. Macro bias: price above EMA200 + EMA8 > EMA21 (short-term uptrend)
         #    + EMA55 rising (medium-term trend up: ~4.5 hrs of context)
@@ -625,8 +684,10 @@ class BacktestEngineAPlus:
             return None
 
         # ── Build trade levels ──────────────────────────────────── #
-        # Tight ATR-anchored stop: 1.0 × ATR below entry (consistent risk)
-        sl = cl - 1.0 * atr
+        # ATR-anchored stop — capped at atr_stop_cap × ATR to limit dollar risk on
+        # moderately elevated volatility days that pass the spike filter.
+        stop_atr = min(atr, self.atr_stop_cap * (atr_avg20 if not np.isnan(atr_avg20) else atr))
+        sl = cl - 1.0 * stop_atr
 
         u1 = float(df["vwap_85_u1"].iloc[i])
         u2 = float(df["vwap_85_u2"].iloc[i])
@@ -704,6 +765,22 @@ class BacktestEngineAPlus:
         if np.isnan(adx) or adx < self.min_adx:
             return None
 
+        # Volatility spike filter (same as long side)
+        atr_avg20 = float(df["atr_avg20"].iloc[i])
+        if not np.isnan(atr_avg20) and atr_avg20 > 0:
+            if atr > self.max_atr_multiple * atr_avg20:
+                return None
+
+        # IB range quality filter (same as long side)
+        ib_hi_s = float(df["ib_high"].iloc[i])
+        ib_lo   = float(df["ib_low"].iloc[i])
+        if not np.isnan(ib_lo) and not np.isnan(ib_hi_s):
+            ib_range = ib_hi_s - ib_lo
+            if ib_range < 0.25 * atr:
+                return None
+            if ib_range > 3.0 * atr:
+                return None
+
         # 1. Macro bias: price below EMA200 + DI alignment (-DI dominates)
         #    + short-term EMA8 < EMA21 (momentum is down)
         if cl > e200:
@@ -766,8 +843,9 @@ class BacktestEngineAPlus:
             return None
 
         # ── Build trade levels ──────────────────────────────────── #
-        # Tight ATR-anchored stop: 1.0 × ATR above entry (consistent risk)
-        sl = cl + 1.0 * atr
+        # ATR-anchored stop — capped at atr_stop_cap × avg ATR (same logic as long)
+        stop_atr = min(atr, self.atr_stop_cap * (atr_avg20 if not np.isnan(atr_avg20) else atr))
+        sl = cl + 1.0 * stop_atr
 
         l1 = float(df["vwap_85_l1"].iloc[i])
         l2 = float(df["vwap_85_l2"].iloc[i])

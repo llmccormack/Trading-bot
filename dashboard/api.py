@@ -5,7 +5,7 @@ Run with: uvicorn dashboard.api:app --reload --port 8000
 """
 import sys, time, traceback, threading, logging
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from typing import Optional
 import pytz
@@ -31,6 +31,8 @@ from backtesting.engine import BacktestEngine
 from backtesting.engine_5m import BacktestEngine5m, run_multi_market, FUTURES_UNIVERSE
 from backtesting.engine_aplus import BacktestEngineAPlus, APLUS_UNIVERSE
 from backtesting.engine_fade_rip import FadeTheRipEngine
+from backtesting.engine_orb import ORBEngine
+from backtesting.engine_vwap_pullback import VWAPPullbackEngine
 from utils.indicators import add_all, get_key_levels
 import duckdb
 
@@ -61,21 +63,21 @@ def _make_live_engine(sym: str):
         )
     return BacktestEngineAPlus(
         min_adx=18.0, min_score=0.75, allow_short=False, require_macro_confirm=False,
-        skip_monday=True, skip_power_hour_open=True,
+        skip_monday=True, skip_power_hour=True,    # skip ALL power hour — IB is stale by 2 PM
     )
 
 # ─────────────────────────────────────────────────────────────────────
 # SERVER-SIDE AUTOPILOT (runs in background thread, no browser needed)
 # ─────────────────────────────────────────────────────────────────────
 _AP_ET        = pytz.timezone("America/New_York")
-_AP_SYMBOLS   = ["NQ=F", "ES=F", "GC=F"]
+_AP_SYMBOLS   = ["NQ=F", "ES=F"]  # GC removed — no edge confirmed in current regime
 _AP_INTERVAL  = 5 * 60          # check every 5 minutes
 
 # ── VIX filter ────────────────────────────────────────────────────── #
 # If VIX >= this threshold at market open, skip all entries for the day.
 # Protects against high-volatility event days (e.g. tariff announcements).
 # TopStep daily loss limit is ~$2k — extreme VIX days blow through that.
-VIX_BLOCK_THRESHOLD = 25.0
+VIX_BLOCK_THRESHOLD = 22.0
 _VIX_CACHE: dict = {}   # {"date": str, "vix": float, "blocked": bool}
 
 def _get_vix_today() -> tuple[float, bool]:
@@ -108,10 +110,34 @@ def _get_vix_today() -> tuple[float, bool]:
     else:
         _aplog.info(f"VIX check OK: {vix:.1f} (threshold {VIX_BLOCK_THRESHOLD})")
     return vix, blocked
-_AP_LOG       = Path(__file__).resolve().parent.parent / "autopilot.log"
+_AP_LOG        = Path(__file__).resolve().parent.parent / "autopilot.log"
 _AP_STATE_FILE = Path(__file__).resolve().parent.parent / "autopilot_state.json"
-_AP_ARMED     = True            # server-side autopilot starts armed by default
-_AP_LOCK      = threading.Lock()
+_AP_PID_FILE   = Path(__file__).resolve().parent.parent / "autopilot.pid"
+_AP_ARMED      = True            # server-side autopilot starts armed by default
+_AP_LOCK       = threading.Lock()
+
+# ── PID lock — kill stale server if another instance is already running ─ #
+def _enforce_single_instance() -> None:
+    """
+    Write our PID to autopilot.pid. If the file already exists with a live PID,
+    kill that process first so only one autopilot loop is ever running.
+    """
+    import os, signal
+    if _AP_PID_FILE.exists():
+        try:
+            old_pid = int(_AP_PID_FILE.read_text().strip())
+            if old_pid != os.getpid():
+                try:
+                    os.kill(old_pid, signal.SIGKILL)
+                    import time as _t; _t.sleep(0.5)
+                    logging.getLogger("autopilot").warning(
+                        f"Killed stale autopilot process PID {old_pid} — only one instance allowed"
+                    )
+                except ProcessLookupError:
+                    pass   # already gone
+        except (ValueError, OSError):
+            pass
+    _AP_PID_FILE.write_text(str(os.getpid()))
 
 # ── Persistent state (survives server restarts) ───────────────────── #
 def _load_ap_state() -> dict:
@@ -176,6 +202,20 @@ def _ap_is_market_hours() -> bool:
     return now.weekday() < 5 and 9 <= now.hour < 16
 
 
+
+def _get_today_pnl() -> float:
+    """Return today's total realized P&L from the journal (negative = loss)."""
+    try:
+        today = datetime.now(_AP_ET).strftime("%Y-%m-%d")
+        conn  = duckdb.connect(DB_PATH)
+        row   = conn.execute(
+            "SELECT COALESCE(SUM(pnl),0) FROM trade_journal WHERE closed_at::DATE = ?", [today]
+        ).fetchone()
+        conn.close()
+        return float(row[0]) if row else 0.0
+    except Exception:
+        return 0.0
+
 def _ap_run_cycle(broker: "PaperBroker") -> None:
     """One scan cycle: check all symbols, execute paper trades on signals."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -190,14 +230,37 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             cur_px = snap.get("last_price") if snap else None
             engine = _make_live_engine(sym)
             sig = engine.live_signal(df, current_price=cur_px)
-            # If A+ finds no long, check Fade the Rip for a short (index futures only)
-            # Apply same day/time guards as A+: skip Monday, skip power hour (14:00-14:30 ET)
+
             _now_et = datetime.now(ZoneInfo("America/New_York"))
-            _is_monday = _now_et.weekday() == 0
+            _is_monday          = _now_et.weekday() == 0
             _is_power_hour_open = _now_et.hour == 14 and _now_et.minute < 30
-            if sig is None and sym not in _COMMODITY_SYMBOLS and not _is_monday and not _is_power_hour_open:
-                fade_engine = FadeTheRipEngine()
-                sig = fade_engine.live_signal(df, current_price=cur_px)
+            _index_sym          = sym not in _COMMODITY_SYMBOLS
+
+            # ── ORB: 9:45–10:15 AM long-only, macro-filtered, skips Monday ──
+            # Fires before A+ takes over — fills the opening session gap.
+            if sig is None and _index_sym and not _is_monday:
+                orb_engine = ORBEngine(skip_monday=True)
+                sig = orb_engine.live_signal(df, current_price=cur_px)
+
+            # ── VWAP Pullback: ES only — NQ shows no edge in current regime ──
+            # Only run when no higher-priority signal fired and outside power hour.
+            _es_sym = sym == "ES=F"
+            if sig is None and _es_sym and not _is_monday and not _is_power_hour_open:
+                vwap_engine = VWAPPullbackEngine(skip_monday=True)
+                sig = vwap_engine.live_signal(df, current_price=cur_px)
+
+            # ── Fade the Rip: short fallback (disabled in TopStep mode — no shorts) ──
+            if sig is None and _index_sym and not _is_monday and not _is_power_hour_open:
+                if not settings.topstep_mode:
+                    fade_engine = FadeTheRipEngine()
+                    sig = fade_engine.live_signal(df, current_price=cur_px)
+
+            # ── TopStep mode: enforce tighter score threshold ──
+            if sig and settings.topstep_mode and sig.get("score", 1.0) < 0.75:
+                _aplog.info(
+                    f"SKIP {sym}: TopStep mode — score {sig["score"]:.2f} below 0.75 threshold"
+                )
+                sig = None
             # Auto-close stops/targets
             closed = broker.check_stops_and_targets(root, cur_px) if cur_px else []
             for msg in closed:
@@ -249,8 +312,29 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                 _aplog.info(f"SKIP {sym}: no setup (A+ long or Fade short — score below threshold or outside window)")
                 continue
 
+            # ── TopStep combine: hard daily loss limit ──────────────── #
+            if settings.topstep_mode:
+                today_pnl = _get_today_pnl()
+                if today_pnl <= -settings.topstep_daily_loss_limit:
+                    _aplog.warning(
+                        f"TOPSTEP HALT {sym}: daily loss ${today_pnl:.2f} >= "
+                        f"limit ${settings.topstep_daily_loss_limit:.0f} — no more entries today"
+                    )
+                    continue
+                # Warn at 70% of limit
+                warn_threshold = settings.topstep_daily_loss_limit * 0.70
+                if today_pnl <= -warn_threshold:
+                    _aplog.warning(
+                        f"TOPSTEP CAUTION {sym}: daily loss ${today_pnl:.2f} "
+                        f"({abs(today_pnl)/settings.topstep_daily_loss_limit*100:.0f}% of limit)"
+                    )
+
             # ── VIX block: skip entries on extreme volatility days ─── #
+            _vix_threshold_live = 20.0 if settings.topstep_mode else VIX_BLOCK_THRESHOLD
             _, vix_blocked = _get_vix_today()
+            # Re-check with TopStep's tighter VIX threshold
+            if settings.topstep_mode and _VIX_CACHE.get("vix", 0.0) >= _vix_threshold_live:
+                vix_blocked = True
             if vix_blocked:
                 _aplog.info(f"SKIP {sym}: VIX block active — too volatile to trade today")
                 continue
@@ -258,7 +342,7 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             # Re-entry logic:
             #   NQ: up to 2 trades/day regardless of outcome (backtested — improves PF)
             #   All others: 1 trade/day, re-entry only after a loss
-            max_trades_today = 2 if root == "NQ" else 1
+            max_trades_today = 1 if settings.topstep_mode else (2 if root == "NQ" else 1)
             with _AP_LOCK:
                 traded = _AP_TRADED_TODAY.get(sym, {})
             if traded.get("date") == today_str:
@@ -276,6 +360,22 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                 f"SIGNAL {sig['direction']} {sym} | entry={sig['entry']} "
                 f"stop={sig['stop']} target={sig['target']} score={sig['score']}"
             )
+
+            # ── Dollar risk cap — final backstop against extreme ATR days ──
+            # Even if the engine ATR-spike filter passes, cap absolute dollar risk
+            # per contract so a single stop can never blow the daily limit.
+            _CONTRACT_MULT = {"NQ": 20, "ES": 50, "GC": 10, "CL": 100}
+            _MAX_DOLLAR_RISK = {"NQ": 1000, "ES": 800}   # per contract per trade
+            _mult = _CONTRACT_MULT.get(root, 20)
+            _risk_pts   = abs(sig["entry"] - sig["stop"])
+            _dollar_risk = _risk_pts * _mult
+            _max_risk = _MAX_DOLLAR_RISK.get(root, 1200)
+            if _dollar_risk > _max_risk:
+                _aplog.warning(
+                    f"SKIP {sym}: dollar risk ${_dollar_risk:.0f} > cap ${_max_risk} "
+                    f"(stop={_risk_pts:.1f}pts × ${_mult}/pt) — ATR too wide today"
+                )
+                continue
 
             # Correlation block: only one index future open at a time
             if root in _INDEX_ROOTS:
@@ -309,13 +409,62 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                     body     = (
                         f"{sig['direction']} @ {sig['entry']:.2f}\n"
                         f"Stop: {sig['stop']:.2f}  |  Target: {sig['target']:.2f}\n"
-                        f"Score: {sig['score']:.2f}  |  {sig.get('regime','')}"
+                        f"Risk: ${_dollar_risk:.0f} (1R)  |  Score: {sig['score']:.2f}\n"
+                        f"{sig.get('regime','')}"
                     ),
                     tags     = "robot",
                     priority = "high",
                 )
             else:
                 _aplog.warning(f"TRADE REJECTED {sym}: {msg}")
+
+
+def _send_weekly_summary(broker: "PaperBroker") -> None:
+    """Send Friday end-of-week P&L summary (Mon–Fri) to phone."""
+    try:
+        import duckdb
+        now_et = datetime.now(_AP_ET)
+        days_since_mon = now_et.weekday()  # 0=Mon … 4=Fri
+        week_start = (now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+                      - timedelta(days=days_since_mon)).strftime("%Y-%m-%d")
+        conn = duckdb.connect(DB_PATH)
+        rows = conn.execute(
+            "SELECT pnl, r_multiple, symbol FROM trade_journal WHERE closed_at::DATE >= ? ORDER BY closed_at",
+            [week_start]
+        ).fetchall()
+        conn.close()
+
+        n = len(rows)
+        if n == 0:
+            _phone(title="Weekly Wrap — No Trades", body="No trades closed this week.", tags="calendar")
+            _aplog.info("Weekly summary sent: no trades")
+            return
+
+        total_pnl  = sum(r[0] or 0 for r in rows)
+        wins       = sum(1 for r in rows if (r[0] or 0) > 0)
+        gross_win  = sum(r[0] for r in rows if (r[0] or 0) > 0)
+        gross_loss = abs(sum(r[0] for r in rows if (r[0] or 0) <= 0))
+        pf         = round(gross_win / gross_loss, 2) if gross_loss > 0 else 9.99
+        wr         = wins / n * 100
+        avg_r      = sum(r[1] or 0 for r in rows) / n
+        bal        = broker.account_balance
+
+        emoji = "✅" if total_pnl > 0 else "❌"
+        title = f"{emoji} Week — ${total_pnl:+.2f} | {wr:.0f}% WR"
+        body  = (
+            f"{n} trade{'s' if n>1 else ''} | {wins}W {n-wins}L | PF {pf:.2f} | Avg {avg_r:+.2f}R\n"
+            f"Balance: ${bal:,.2f}"
+        )
+        if settings.topstep_mode:
+            combine_profit = bal - settings.paper_account_size
+            body += (
+                f"\nCombine P&L: ${combine_profit:+,.0f} / ${settings.topstep_profit_target:,.0f} target"
+            )
+
+        _phone(title=title, body=body[:500], tags="calendar,bar_chart", priority="default")
+        _aplog.info(f"Weekly summary sent: {title}")
+    except Exception as e:
+        _aplog.warning(f"Weekly summary failed: {e}")
 
 
 _AP_SUMMARY_SENT: set[str] = set(_ap_state_init.get("summary_sent", []))
@@ -421,13 +570,35 @@ def _ap_background_loop(broker_ref_fn) -> None:
                     _AP_HEALTH_SENT.add(today_str)
                     _save_ap_state()
                     open_pos = broker.open_positions
+                    # Pull this week's stats for context
+                    _week_summary = ""
+                    try:
+                        _days_since_mon = now_et.weekday()
+                        _wk_start = (now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+                                     - timedelta(days=_days_since_mon)).strftime("%Y-%m-%d")
+                        _conn = duckdb.connect(DB_PATH)
+                        _wk_rows = _conn.execute(
+                            "SELECT pnl FROM trade_journal WHERE closed_at::DATE >= ?", [_wk_start]
+                        ).fetchall()
+                        _conn.close()
+                        if _wk_rows:
+                            _wk_n    = len(_wk_rows)
+                            _wk_pnl  = sum(r[0] or 0 for r in _wk_rows)
+                            _wk_wins = sum(1 for r in _wk_rows if (r[0] or 0) > 0)
+                            _week_summary = (
+                                f"\nThis week: {_wk_n} trades | "
+                                f"{_wk_wins}W {_wk_n-_wk_wins}L | "
+                                f"${_wk_pnl:+.0f}"
+                            )
+                    except Exception:
+                        pass
                     _phone(
                         title    = "Rival Automations — Server Alive",
                         body     = (
-                            f"Watching NQ, ES, GC | Armed: {_AP_ARMED}\n"
+                            f"Watching NQ, ES | Armed: {_AP_ARMED}\n"
                             f"Open positions: {len(open_pos)} | "
-                            f"Balance: ${broker.account_balance:,.0f}\n"
-                            f"Entry windows: 10:15-11:30 and 14:00-15:55 ET"
+                            f"Balance: ${broker.account_balance:,.0f}"
+                            + _week_summary
                         ),
                         tags     = "eyes",
                         priority = "default",
@@ -466,6 +637,14 @@ def _ap_background_loop(broker_ref_fn) -> None:
                     _save_ap_state()
                     _send_daily_summary(broker)
 
+            # ── Weekly summary on Friday at 4:15 PM ET ────────────────── #
+            if (now_et.weekday() == 4 and now_et.hour == 16 and now_et.minute >= 15):
+                week_key = f"weekly-{today_str}"
+                if week_key not in _AP_SUMMARY_SENT:
+                    _AP_SUMMARY_SENT.add(week_key)
+                    _save_ap_state()
+                    _send_weekly_summary(broker)
+
             time.sleep(_AP_INTERVAL)
         except Exception as e:
             _aplog.error(f"Autopilot loop error: {e}")
@@ -474,6 +653,8 @@ def _ap_background_loop(broker_ref_fn) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    # Enforce single-instance — kill any previously running autopilot process
+    _enforce_single_instance()
     # Start the server-side autopilot in a background daemon thread
     t = threading.Thread(
         target=_ap_background_loop,
@@ -484,6 +665,12 @@ async def _lifespan(app: FastAPI):
     t.start()
     _aplog.info("Server autopilot thread launched")
     yield
+    # Clean up PID file on graceful shutdown
+    try:
+        if _AP_PID_FILE.exists():
+            _AP_PID_FILE.unlink()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="Rival Automations — Trading Terminal", version="2.0", lifespan=_lifespan)
@@ -628,6 +815,18 @@ def live_prices_batch():
             r = f.result()
             out[r["_symbol"]] = r
     return out
+
+
+@app.get("/api/vix")
+def get_vix_level():
+    """Return today's cached VIX level and block status."""
+    vix, blocked = _get_vix_today()
+    return {
+        "vix":        round(vix, 2),
+        "blocked":    blocked,
+        "threshold":  20.0 if settings.topstep_mode else VIX_BLOCK_THRESHOLD,
+        "topstep_mode": settings.topstep_mode,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -920,7 +1119,8 @@ def run_backtest(req: BacktestRequest):
                 allow_short=req.allow_short,
                 require_macro_confirm=False,
                 skip_monday=True,
-                skip_power_hour_open=True,
+                skip_power_hour=True,      # IB is stale by 2 PM — no power hour entries
+                max_atr_multiple=1.5,      # filter extreme volatility spike days
             )
         elif req.engine == "5m":
             engine = BacktestEngine5m(
@@ -1042,10 +1242,12 @@ def run_multi_backtest():
 # AUTOPILOT  — multi-symbol, parallel
 # ─────────────────────────────────────────────────────────────────────
 
-# Profit-factor ranked defaults (backtest-confirmed edge):
-#   NQ=F  PF 1.83 (A+ 5m)  |  ES=F  PF 1.34 (A+ 5m)  |  GC=F  PF 5.50/1.58 (ORB 5m / 1h)
-#   CL=F removed — PF 0.88 over 365d 1h, no confirmed edge
-AP_DEFAULT_SYMBOLS = ["NQ=F", "ES=F", "GC=F"]
+# Backtest results (60d Mar-Apr 2026, high-volatility tariff regime, VIX>=22 blocked live):
+#   NQ=F  A+ | ORB PF 1.06 (44% WR) | VWAP PB: no edge in current regime (disabled)
+#   ES=F  A+ | ORB PF 0.89 (40% WR) | VWAP PB PF 3.12 (ES only, T1=1.5R, trail after T2)
+#   GC=F  ORB 5m / 1h
+#   Signal cascade: A+ → ORB (9:45-10:15, NQ+ES) → VWAP PB (ES only) → Fade the Rip
+AP_DEFAULT_SYMBOLS = ["NQ=F", "ES=F"]
 
 # Ticker roots for get_live_price (strip =F suffix)
 _TICKER_ROOT = {"NQ=F": "NQ", "ES=F": "ES", "GC=F": "GC", "CL=F": "CL",
@@ -1078,6 +1280,18 @@ def autopilot_check(req: AutopilotRequest):
             else:
                 engine = _make_live_engine(sym)
             sig     = engine.live_signal(df, current_price=cur_px)
+
+            # Cascade: ORB → VWAP PB → Fade the Rip (index futures only)
+            if req.mode in ("aplus", "5m") and sig is None and sym not in _COMMODITY_SYMBOLS:
+                _net = datetime.now(ZoneInfo("America/New_York"))
+                _mon = _net.weekday() == 0
+                _pho = _net.hour == 14 and _net.minute < 30
+                if not _mon:
+                    sig = ORBEngine(skip_monday=True).live_signal(df, current_price=cur_px)
+                if sig is None and sym == "ES=F" and not _mon and not _pho:
+                    sig = VWAPPullbackEngine(skip_monday=True).live_signal(df, current_price=cur_px)
+                if sig is None and not _mon and not _pho:
+                    sig = FadeTheRipEngine().live_signal(df, current_price=cur_px)
 
             # Auto-close any open paper positions that have hit stop or target
             closed_msgs = []
@@ -1162,6 +1376,77 @@ def get_positions():
 
 
 # ─────────────────────────────────────────────────────────────────────
+# QUICK PERFORMANCE SNAPSHOT  (used by dashboard stats panel)
+# ─────────────────────────────────────────────────────────────────────
+@app.get("/api/performance/snapshot")
+def performance_snapshot():
+    """Return 30-day PF/WR for each active strategy across NQ and ES."""
+    results = []
+    try:
+        for sym in ["NQ=F", "ES=F"]:
+            df = fetch_historical(sym, "5m", days_back=30)
+
+            # A+
+            try:
+                r = BacktestEngineAPlus(min_adx=18.0, min_score=0.75, allow_short=False,
+                                        require_macro_confirm=False, skip_monday=True,
+                                        skip_power_hour=True, max_atr_multiple=1.5).run(df, symbol=sym)
+                if r.trades:
+                    wins = sum(1 for t in r.trades if t.r_multiple >= 1.0)
+                    gw = sum(t.pnl_pts for t in r.trades if t.pnl_pts > 0)
+                    gl = abs(sum(t.pnl_pts for t in r.trades if t.pnl_pts < 0))
+                    results.append({
+                        "symbol": sym, "strategy": "A+ IB Retest",
+                        "trades": len(r.trades),
+                        "wr": round(wins / len(r.trades) * 100, 1),
+                        "pf": round(gw / gl, 2) if gl > 0 else 99.0,
+                        "total_r": round(sum(t.r_multiple for t in r.trades), 1),
+                    })
+            except Exception:
+                pass
+
+            # ORB
+            try:
+                r = ORBEngine(allow_short=False).run(df, symbol=sym)
+                if r.trades:
+                    wins = sum(1 for t in r.trades if t.r_multiple >= 1.0)
+                    gw = sum(t.pnl_pts for t in r.trades if t.pnl_pts > 0)
+                    gl = abs(sum(t.pnl_pts for t in r.trades if t.pnl_pts < 0))
+                    results.append({
+                        "symbol": sym, "strategy": "ORB",
+                        "trades": len(r.trades),
+                        "wr": round(wins / len(r.trades) * 100, 1),
+                        "pf": round(gw / gl, 2) if gl > 0 else 99.0,
+                        "total_r": round(sum(t.r_multiple for t in r.trades), 1),
+                    })
+            except Exception:
+                pass
+
+            # VWAP PB (ES only)
+            if sym == "ES=F":
+                try:
+                    r = VWAPPullbackEngine().run(df, symbol=sym)
+                    if r.trades:
+                        wins = sum(1 for t in r.trades if t.r_multiple >= 1.0)
+                        gw = sum(t.pnl_pts for t in r.trades if t.pnl_pts > 0)
+                        gl = abs(sum(t.pnl_pts for t in r.trades if t.pnl_pts < 0))
+                        results.append({
+                            "symbol": sym, "strategy": "VWAP PB",
+                            "trades": len(r.trades),
+                            "wr": round(wins / len(r.trades) * 100, 1),
+                            "pf": round(gw / gl, 2) if gl > 0 else 99.0,
+                            "total_r": round(sum(t.r_multiple for t in r.trades), 1),
+                        })
+                except Exception:
+                    pass
+
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+    return {"results": results, "days": 30}
+
+
+# ─────────────────────────────────────────────────────────────────────
 # JOURNAL
 # ─────────────────────────────────────────────────────────────────────
 # ─────────────────────────────────────────────────────────────────────
@@ -1212,8 +1497,8 @@ def get_settings():
         "max_risk_per_trade_pct":   settings.max_risk_per_trade_pct,
         "max_daily_loss_pct":       settings.max_daily_loss_pct,
         "max_concurrent_positions": settings.max_concurrent_positions,
-        "ibkr_host":                settings.ibkr_host,
-        "ibkr_port":                settings.ibkr_port,
+        "ibkr_host":                getattr(settings, "ibkr_host", None),
+        "ibkr_port":                getattr(settings, "ibkr_port", None),
         # True/False tells the frontend whether a key is set (value masked)
         "anthropic_api_key": bool(settings.anthropic_api_key),
         "polygon_api_key":   bool(settings.polygon_api_key),
@@ -1302,6 +1587,68 @@ def ap_arm(body: dict = Body(...)):
     return {"ok": True, "armed": _AP_ARMED}
 
 
+
+
+# ─────────────────────────────────────────────────────────────────────
+# TOPSTEP COMBINE MODE
+# ─────────────────────────────────────────────────────────────────────
+@app.get("/api/topstep/state")
+def topstep_state():
+    """Return TopStep combine mode state and progress metrics."""
+    today_pnl    = _get_today_pnl()
+    limit        = settings.topstep_daily_loss_limit
+    target       = settings.topstep_profit_target
+    bal          = _broker.account_balance
+    baseline     = settings.paper_account_size
+    total_profit = bal - baseline
+
+    # How close to daily limit (0.0 = fine, 1.0 = at limit)
+    daily_loss_pct = max(0.0, -today_pnl / limit) if limit > 0 else 0.0
+    # Progress toward profit target (0.0 → 1.0)
+    profit_progress = max(0.0, min(1.0, total_profit / target)) if target > 0 else 0.0
+
+    return {
+        "enabled":            settings.topstep_mode,
+        "daily_loss_limit":   limit,
+        "profit_target":      target,
+        "today_pnl":          round(today_pnl, 2),
+        "total_profit":       round(total_profit, 2),
+        "daily_loss_pct":     round(daily_loss_pct, 3),
+        "profit_progress":    round(profit_progress, 3),
+        "halted_today":       today_pnl <= -limit,
+        "account_balance":    round(bal, 2),
+        "score_threshold":    0.75,
+        "vix_block_threshold": 20.0 if settings.topstep_mode else VIX_BLOCK_THRESHOLD,
+    }
+
+
+@app.post("/api/topstep/toggle")
+def topstep_toggle(body: dict = Body(...)):
+    """Enable or disable TopStep combine mode."""
+    enabled = bool(body.get("enabled", True))
+    try:
+        object.__setattr__(settings, "topstep_mode", enabled)
+    except Exception:
+        pass
+    # Persist to .env
+    pairs = _read_env()
+    pairs["TOPSTEP_MODE"] = "true" if enabled else "false"
+    _write_env(pairs)
+    _aplog.info(f"TopStep mode {'ENABLED' if enabled else 'DISABLED'} via API")
+    if enabled:
+        _phone(
+            title = "TopStep Combine Mode ENABLED",
+            body  = (
+                f"Tighter risk active:\n"
+                f"  Score threshold: 0.75 (unchanged — edge comes from dollar limits, not score filter)\n"
+                f"  Daily loss limit: ${settings.topstep_daily_loss_limit:.0f}\n"
+                f"  VIX block: 20 (was {VIX_BLOCK_THRESHOLD})\n"
+                f"  Shorts (Fade) disabled"
+            ),
+            tags = "trophy",
+        )
+    return {"ok": True, "enabled": enabled}
+
 @app.get("/api/journal")
 def get_journal(limit: int = 200):
     try:
@@ -1348,22 +1695,81 @@ def get_journal(limit: int = 200):
         best_trade  = round(float(jdf["pnl"].max()), 2)
         worst_trade = round(float(jdf["pnl"].min()), 2)
 
-        # Best / worst day
+        # Best / worst day + daily breakdown for bar chart
         import pandas as pd
         jdf["_date"] = pd.to_datetime(jdf["opened_at"]).dt.date
-        by_day = jdf.groupby("_date")["pnl"].sum()
+        by_day = jdf.groupby("_date")["pnl"].sum().sort_index()   # oldest → newest
         best_day  = round(float(by_day.max()), 2) if len(by_day) else 0
         worst_day = round(float(by_day.min()), 2) if len(by_day) else 0
+        # daily_pnl: [{date, pnl, trades, wins}] for bar chart
+        by_day_trades = jdf.groupby("_date").agg(
+            pnl   = ("pnl", "sum"),
+            trades= ("pnl", "count"),
+            wins  = ("pnl", lambda x: (x > 0).sum()),
+        ).sort_index()
+        daily_pnl = [
+            {
+                "date":   str(d),
+                "pnl":    round(float(row["pnl"]), 2),
+                "trades": int(row["trades"]),
+                "wins":   int(row["wins"]),
+            }
+            for d, row in by_day_trades.iterrows()
+        ]
 
         # Avg R
         avg_r = round(float(jdf["r_multiple"].mean()), 2) if len(jdf) else 0
 
+        overall_wr = round(len(wins)/len(jdf), 3)
+
+        # ── Per-strategy breakdown ────────────────────────────────────
+        strategy_stats = []
+        for strat, grp in jdf.groupby("strategy_used"):
+            s_wins   = grp[grp["pnl"] > 0]
+            s_losses = grp[grp["pnl"] <= 0]
+            s_gw     = float(s_wins["pnl"].sum())
+            s_gl     = abs(float(s_losses["pnl"].sum()))
+            strategy_stats.append({
+                "strategy":      strat or "unknown",
+                "trades":        len(grp),
+                "win_rate":      round(len(s_wins) / len(grp), 3),
+                "total_pnl":     round(float(grp["pnl"].sum()), 2),
+                "avg_r":         round(float(grp["r_multiple"].mean()), 2),
+                "profit_factor": round(s_gw / s_gl, 2) if s_gl > 0 else 9.99,
+            })
+        strategy_stats.sort(key=lambda x: x["total_pnl"], reverse=True)
+
+        # ── TopStep combine readiness (only computed when mode is on) ──
+        topstep_readiness = None
+        if settings.topstep_mode:
+            unique_days    = int(jdf["_date"].nunique())
+            bal            = _broker.account_balance
+            combine_profit = round(bal - settings.paper_account_size, 2)
+            worst_day_val  = round(float(by_day.min()), 2)
+            topstep_readiness = {
+                "days_traded":       unique_days,
+                "combine_profit":    combine_profit,
+                "profit_target":     settings.topstep_profit_target,
+                "daily_loss_limit":  2000.0,   # TopStep official limit; bot halts at 1000
+                "worst_day":         worst_day_val,
+                "win_rate":          overall_wr,
+                "balance":           round(bal, 2),
+                # Requirement checklist
+                "profit_met":        combine_profit >= settings.topstep_profit_target,
+                "days_met":          unique_days >= 10,
+                "wr_met":            overall_wr >= 0.55,
+                "daily_loss_met":    worst_day_val >= -2000.0,
+            }
+
         return {
             "trades": jdf.drop(columns=["_date"]).to_dict("records"),
             "equity_curve": [round(v, 2) for v in cum_pnl.values],
+            "daily_pnl": daily_pnl,
+            "strategy_stats": strategy_stats,
+            "topstep_readiness": topstep_readiness,
             "stats": {
                 "total_trades":  len(jdf),
-                "win_rate":      round(len(wins)/len(jdf), 3),
+                "win_rate":      overall_wr,
                 "total_pnl":     round(float(jdf["pnl"].sum()), 2),
                 "avg_win":       round(float(wins["pnl"].mean()), 2)   if len(wins)   else 0,
                 "avg_loss":      round(float(losses["pnl"].mean()), 2) if len(losses) else 0,
