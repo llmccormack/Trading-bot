@@ -173,9 +173,13 @@ _AP_TRADED_TODAY: dict[str, dict] = _ap_state_init.get("traded_today", {})
 
 _NTFY_TOPIC   = "rival-automation-tradez-wLuke"
 _NTFY_URL     = f"https://ntfy.sh/{_NTFY_TOPIC}"
+_NOTIFY_ENABLED = False  # set True to re-enable push notifications
 
 def _phone(title: str, body: str, tags: str = "chart_with_upwards_trend", priority: str = "default") -> None:
     """Send a push notification to phone via ntfy.sh (fire-and-forget)."""
+    if not _NOTIFY_ENABLED:
+        _aplog.info(f"[notify off] {title} — {body[:80]}")
+        return
     try:
         import urllib.request
         data = body.encode("utf-8")

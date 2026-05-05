@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     # Database
     db_path: str = Field(default="./trading_bot.duckdb")
 
+    # TopStep combine mode
+    # When enabled: tighter score thresholds, hard daily loss cap, no shorts, lower VIX block
+    topstep_mode: bool = Field(default=False)
+    topstep_daily_loss_limit: float = Field(default=1000.0)   # hard $ stop-out for the combine
+    topstep_profit_target:    float = Field(default=6000.0)   # $100k account target
+
     @property
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"
