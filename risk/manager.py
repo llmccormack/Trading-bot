@@ -96,12 +96,14 @@ class RiskManager:
         dollar_risk = position_size * risk_per_unit
 
         # 5. Check that sizing doesn't push daily loss over the limit
+        # Only count realised losses — a winning day should not block new trades.
         max_daily_loss = req.account_balance * (self.max_daily_loss_pct / 100)
-        if abs(self._daily_realized_pnl) + dollar_risk > max_daily_loss:
+        current_loss = max(0.0, -self._daily_realized_pnl)   # 0 if up, positive if down
+        if current_loss + dollar_risk > max_daily_loss:
             return RiskValidation(
                 False, 0, dollar_risk, r_ratio,
                 rejection_reason=(
-                    f"This trade's risk (${dollar_risk:.2f}) would push total daily exposure "
+                    f"This trade's risk (${dollar_risk:.2f}) would push total daily loss "
                     f"past the max daily loss limit (${max_daily_loss:.2f})"
                 )
             )

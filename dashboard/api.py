@@ -1659,10 +1659,20 @@ def get_journal(limit: int = 200):
         conn = duckdb.connect(DB_PATH)
         jdf  = conn.execute(f"""
             SELECT symbol, direction, entry_price, exit_price, qty,
-                   pnl, r_multiple, strategy_used, opened_at, closed_at
+                   pnl, r_multiple, strategy_used, opened_at, closed_at,
+                   ai_reasoning
             FROM trade_journal ORDER BY opened_at DESC LIMIT {limit}
         """).df()
         conn.close()
+
+        # Extract composite score from ai_reasoning (e.g. "score=0.76")
+        import re as _re
+        def _parse_score(text):
+            if not isinstance(text, str):
+                return None
+            m = _re.search(r"score=([0-9.]+)", text)
+            return round(float(m.group(1)), 2) if m else None
+        jdf["composite_score"] = jdf["ai_reasoning"].apply(_parse_score)
 
         if len(jdf) == 0:
             return {"trades": [], "stats": None}
@@ -1766,7 +1776,7 @@ def get_journal(limit: int = 200):
             }
 
         return {
-            "trades": jdf.drop(columns=["_date"]).to_dict("records"),
+            "trades": jdf.drop(columns=["_date", "ai_reasoning"]).to_dict("records"),
             "equity_curve": [round(v, 2) for v in cum_pnl.values],
             "daily_pnl": daily_pnl,
             "strategy_stats": strategy_stats,
