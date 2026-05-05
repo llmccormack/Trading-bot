@@ -173,7 +173,7 @@ _AP_TRADED_TODAY: dict[str, dict] = _ap_state_init.get("traded_today", {})
 
 _NTFY_TOPIC   = "rival-automation-tradez-wLuke"
 _NTFY_URL     = f"https://ntfy.sh/{_NTFY_TOPIC}"
-_NOTIFY_ENABLED = False  # set True to re-enable push notifications
+_NOTIFY_ENABLED = True   # PID lock prevents duplicate processes — notifications are safe again
 
 def _phone(title: str, body: str, tags: str = "chart_with_upwards_trend", priority: str = "default") -> None:
     """Send a push notification to phone via ntfy.sh (fire-and-forget)."""
