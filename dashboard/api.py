@@ -686,6 +686,40 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── HTTP Basic Auth middleware ─────────────────────────────────────── #
+# Set DASHBOARD_USER and DASHBOARD_PASS in Railway environment variables.
+# If neither is set the app runs open (backward-compatible for local dev).
+import base64 as _b64
+_DASH_USER = os.environ.get("DASHBOARD_USER", "")
+_DASH_PASS = os.environ.get("DASHBOARD_PASS", "")
+_AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request as _Request
+from starlette.responses import Response as _Response
+
+class _BasicAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: _Request, call_next):
+        # Health check always passes — Railway needs it to confirm the app is up
+        if request.url.path in ("/api/health", "/api/health/"):
+            return await call_next(request)
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                decoded = _b64.b64decode(auth[6:]).decode("utf-8")
+                user, _, pwd = decoded.partition(":")
+                if user == _DASH_USER and pwd == _DASH_PASS:
+                    return await call_next(request)
+            except Exception:
+                pass
+        return _Response(
+            "Unauthorized", status_code=401,
+            headers={"WWW-Authenticate": 'Basic realm="Rival Automations"'},
+        )
+
+if _AUTH_ENABLED:
+    app.add_middleware(_BasicAuthMiddleware)
+
 # ── Serve the frontend HTML ───────────────────────────────────────── #
 _DASH_DIR = Path(__file__).parent
 
