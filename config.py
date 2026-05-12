@@ -40,8 +40,11 @@ class Settings(BaseSettings):
     # TopStep combine mode
     # When enabled: tighter score thresholds, hard daily loss cap, no shorts, lower VIX block
     topstep_mode: bool = Field(default=False)
-    topstep_daily_loss_limit: float = Field(default=1000.0)   # hard $ stop-out for the combine
-    topstep_profit_target:    float = Field(default=6000.0)   # $100k account target
+    topstep_account_size:     float = Field(default=50_000.0) # combine account size ($50K plan)
+    topstep_daily_loss_limit: float = Field(default=1_000.0)  # hard daily stop-out (buffer below $2k trailing limit)
+    topstep_profit_target:    float = Field(default=3_000.0)  # $50K account target (was wrongly set to $6k)
+    topstep_max_contracts:    int   = Field(default=5)        # TopStep $50K = 5 mini / 50 micro hard cap
+    topstep_min_trade_days:   int   = Field(default=10)       # min calendar days before profit target counts
 
     @property
     def is_paper(self) -> bool:

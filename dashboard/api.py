@@ -381,6 +381,23 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                 )
                 continue
 
+            # ── TopStep: 2 consecutive losses today = stop trading ────── #
+            # Protects the trailing max loss limit from being blown in a single
+            # bad day. Reset each morning with the daily reset.
+            if settings.topstep_mode:
+                with _AP_LOCK:
+                    _all_today = [
+                        v for v in _AP_TRADED_TODAY.values()
+                        if v.get("date") == today_str
+                    ]
+                consec_losses = sum(1 for v in _all_today if v.get("outcome") == "loss")
+                if consec_losses >= 2:
+                    _aplog.warning(
+                        f"TOPSTEP SKIP {sym}: {consec_losses} losses today — "
+                        f"stopping entries to protect trailing max loss"
+                    )
+                    continue
+
             # Correlation block: only one index future open at a time
             if root in _INDEX_ROOTS:
                 open_index = {p.symbol for p in broker.open_positions if p.symbol in _INDEX_ROOTS}
