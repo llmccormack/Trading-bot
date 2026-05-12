@@ -64,6 +64,8 @@ def _make_live_engine(sym: str):
     return BacktestEngineAPlus(
         min_adx=18.0, min_score=0.75, allow_short=False, require_macro_confirm=False,
         skip_monday=True, skip_power_hour=True,    # skip ALL power hour — IB is stale by 2 PM
+        # skip_lunch and require_vwap_slope available but backtested neutral at current sample size
+        # re-evaluate after 60+ live trades
     )
 
 # ─────────────────────────────────────────────────────────────────────

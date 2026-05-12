@@ -82,7 +82,9 @@ class BacktestEngineAPlus:
         skip_monday: bool = False,            # skip all entries on Monday (weak day historically)
         skip_power_hour_open: bool = False,   # skip 14:00-14:30 (first 30 min of power hour)
         skip_power_hour: bool = False,        # skip ALL of power hour (14:00-15:55) — IB is stale by then
+        skip_lunch: bool = False,             # skip 11:30 AM – 2:00 PM (low volume chop zone)
         max_atr_multiple: float = 1.5,        # skip if current ATR > this × 20-bar avg ATR (spike filter)
+        require_vwap_slope: bool = False,     # require VWAP-85 trending in direction of trade (30-min slope)
     ):
         self.max_bars              = max_bars
         self.atr_stop_cap          = atr_stop_cap
@@ -96,7 +98,9 @@ class BacktestEngineAPlus:
         self.skip_monday           = skip_monday
         self.skip_power_hour_open  = skip_power_hour_open
         self.skip_power_hour       = skip_power_hour
+        self.skip_lunch            = skip_lunch
         self.max_atr_multiple      = max_atr_multiple
+        self.require_vwap_slope    = require_vwap_slope
 
     # ─────────────────────────────────────────────────────────────── #
     # Public API                                                       #
@@ -521,8 +525,10 @@ class BacktestEngineAPlus:
             (h == 10 and m >= 15) or
             (h == 11 and m < 30)
         )
-        # Lunch continuation: 11:30 AM – 2:00 PM
-        in_lunch = (h == 11 and m >= 30) or (h == 12) or (h == 13)
+        # Lunch: 11:30 AM – 2:00 PM — low volume chop zone, skipped when skip_lunch=True
+        in_lunch = (not self.skip_lunch) and (
+            (h == 11 and m >= 30) or (h == 12) or (h == 13)
+        )
         # Power Hour: 2:00 PM – 3:55 PM (disabled by skip_power_hour)
         if self.skip_power_hour:
             return in_primary or in_lunch
@@ -652,6 +658,15 @@ class BacktestEngineAPlus:
                 break
         if retest_bar is None:
             return None
+
+        # 4b. VWAP-85 slope: must be rising over the last 30 min (6 bars on 5m)
+        #     A flat or declining VWAP means institutional volume isn't pushing up —
+        #     the retest is happening against dead tape, not rising institutional interest.
+        if self.require_vwap_slope and i >= 6:
+            vwap_now  = float(df["vwap_85"].iloc[i])
+            vwap_30m  = float(df["vwap_85"].iloc[i - 6])
+            if not np.isnan(vwap_now) and not np.isnan(vwap_30m) and vwap_now <= vwap_30m:
+                return None   # VWAP flat or declining — no institutional bid
 
         # 5. Reversal candle: engulfing, hammer, OR strong close
         #    Strong close only qualifies when price retested very close to the IB
@@ -815,6 +830,15 @@ class BacktestEngineAPlus:
                 break
         if retest_bar is None:
             return None
+
+        # 4b. VWAP-85 slope: must be declining over the last 30 min (6 bars on 5m)
+        #     A flat or rising VWAP means selling pressure isn't consistent —
+        #     risk of counter-trend squeeze against the short.
+        if self.require_vwap_slope and i >= 6:
+            vwap_now = float(df["vwap_85"].iloc[i])
+            vwap_30m = float(df["vwap_85"].iloc[i - 6])
+            if not np.isnan(vwap_now) and not np.isnan(vwap_30m) and vwap_now >= vwap_30m:
+                return None   # VWAP flat or rising — no institutional selling pressure
 
         # 5. Reversal candle: bearish engulfing, shooting star, OR strong close bear
         bearish_eng    = self._is_bearish_engulfing(df, i)
