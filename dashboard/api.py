@@ -686,39 +686,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── HTTP Basic Auth middleware ─────────────────────────────────────── #
-# Set DASHBOARD_USER and DASHBOARD_PASS in Railway environment variables.
-# If neither is set the app runs open (backward-compatible for local dev).
-import os, base64 as _b64
-_DASH_USER = os.environ.get("DASHBOARD_USER", "")
-_DASH_PASS = os.environ.get("DASHBOARD_PASS", "")
-_AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
+# ── Session-cookie auth ───────────────────────────────────────────── #
+# Set DASHBOARD_PASS in Railway environment variables.
+# If not set the app runs open (local dev unchanged).
+# Users log in once via the dashboard overlay; a 30-day cookie keeps them in.
+import os, secrets as _secrets
+from fastapi.responses import JSONResponse as _JSONResponse
+_DASH_PASS    = os.environ.get("DASHBOARD_PASS", "")
+_AUTH_ENABLED = bool(_DASH_PASS)
+_SESSIONS: set[str] = set()   # in-memory tokens; cleared on redeploy (that's fine)
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request as _Request
 from starlette.responses import Response as _Response
 
-class _BasicAuthMiddleware(BaseHTTPMiddleware):
+_AUTH_BYPASS = {"/api/health", "/api/login"}
+
+class _SessionAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: _Request, call_next):
-        # Health check always passes — Railway needs it to confirm the app is up
-        if request.url.path in ("/api/health", "/api/health/"):
+        if request.url.path.rstrip("/") in _AUTH_BYPASS:
             return await call_next(request)
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Basic "):
-            try:
-                decoded = _b64.b64decode(auth[6:]).decode("utf-8")
-                user, _, pwd = decoded.partition(":")
-                if user == _DASH_USER and pwd == _DASH_PASS:
-                    return await call_next(request)
-            except Exception:
-                pass
-        return _Response(
-            "Unauthorized", status_code=401,
-            headers={"WWW-Authenticate": 'Basic realm="Rival Automations"'},
-        )
+        if request.cookies.get("ra_session") in _SESSIONS:
+            return await call_next(request)
+        # Return 401 JSON for API calls, 403 HTML for page loads
+        # (the frontend login overlay intercepts both)
+        return _Response("Unauthorized", status_code=401)
 
 if _AUTH_ENABLED:
-    app.add_middleware(_BasicAuthMiddleware)
+    app.add_middleware(_SessionAuthMiddleware)
+
+# ── Login endpoint ────────────────────────────────────────────────── #
+@app.post("/api/login")
+def login(body: dict = Body(...)):
+    if not _AUTH_ENABLED:
+        return {"ok": True}
+    if body.get("password") != _DASH_PASS:
+        raise HTTPException(status_code=401, detail="Wrong password")
+    token = _secrets.token_hex(32)
+    _SESSIONS.add(token)
+    resp = _JSONResponse({"ok": True})
+    resp.set_cookie(
+        "ra_session", token,
+        max_age=30 * 24 * 3600,   # 30 days
+        httponly=True,
+        samesite="strict",
+    )
+    return resp
+
+@app.post("/api/logout")
+def logout(request: _Request):
+    token = request.cookies.get("ra_session", "")
+    _SESSIONS.discard(token)
+    resp = _JSONResponse({"ok": True})
+    resp.delete_cookie("ra_session")
+    return resp
 
 # ── Serve the frontend HTML ───────────────────────────────────────── #
 _DASH_DIR = Path(__file__).parent

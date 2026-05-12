@@ -3821,27 +3821,88 @@ async function loadVixBadge() {
   } catch(e) {}
 }
 
-// ── Init ─────────────────────────────────────────────────────────
-window.addEventListener('load', ()=>{
+// ── Auth overlay ─────────────────────────────────────────────────
+async function _checkAuth() {
+  try {
+    const r = await fetch(API + '/api/portfolio');
+    if (r.status === 401) { _showLogin(); return false; }
+    return true;
+  } catch(e) { return true; } // network error — let app load anyway
+}
+
+function _showLogin() {
+  let overlay = document.getElementById('_loginOverlay');
+  if (!overlay) {
+    overlay = document.createElement('div');
+    overlay.id = '_loginOverlay';
+    overlay.style.cssText = [
+      'position:fixed','inset:0','z-index:99999',
+      'background:rgba(10,14,26,0.97)',
+      'display:flex','align-items:center','justify-content:center',
+      'flex-direction:column','gap:16px','font-family:inherit',
+    ].join(';');
+    overlay.innerHTML = `
+      <div style="font-size:1.5rem;font-weight:700;color:#e2e8f0;letter-spacing:.05em">🤖 Rival Automations</div>
+      <div style="color:#94a3b8;font-size:.9rem">Enter your dashboard password</div>
+      <input id="_loginPw" type="password" placeholder="Password"
+        style="padding:10px 16px;border-radius:8px;border:1px solid #334155;
+               background:#1e293b;color:#e2e8f0;font-size:1rem;width:260px;outline:none"
+        autofocus />
+      <button onclick="_submitLogin()"
+        style="padding:10px 24px;border-radius:8px;background:#3b82f6;color:#fff;
+               border:none;font-size:1rem;font-weight:600;cursor:pointer;width:260px">
+        Sign in
+      </button>
+      <div id="_loginErr" style="color:#f87171;font-size:.85rem;min-height:1.2em"></div>
+    `;
+    // Allow Enter key
+    overlay.addEventListener('keydown', e => { if(e.key==='Enter') _submitLogin(); });
+    document.body.appendChild(overlay);
+  }
+  overlay.style.display = 'flex';
+  setTimeout(()=>{ const pw=document.getElementById('_loginPw'); if(pw) pw.focus(); }, 50);
+}
+
+async function _submitLogin() {
+  const pw  = document.getElementById('_loginPw')?.value || '';
+  const err = document.getElementById('_loginErr');
+  if (!pw) { if(err) err.textContent='Enter your password'; return; }
+  try {
+    const r = await fetch(API + '/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw}),
+    });
+    if (r.ok) {
+      document.getElementById('_loginOverlay').style.display = 'none';
+      _initApp(); // start the app now that we're authenticated
+    } else {
+      if(err) err.textContent = 'Wrong password — try again';
+      const pw2 = document.getElementById('_loginPw');
+      if(pw2) { pw2.value=''; pw2.focus(); }
+    }
+  } catch(e) {
+    if(err) err.textContent = 'Connection error — try again';
+  }
+}
+
+function _initApp() {
   loadPortfolio();
   loadAllTickers();
   loadSettings();
   apRefreshServerStatus();
   apPollServerLog();
   loadServerLog();
-  loadPerfPanel();  // strategy performance snapshot
-  loadTopStepState(); // TopStep combine mode state
-  loadVixBadge();   // VIX header badge
-  // Refresh portfolio every 30s, tickers every 15s, server status every 60s, perf every 10min
+  loadPerfPanel();
+  loadTopStepState();
+  loadVixBadge();
   setInterval(loadPortfolio, 30000);
   setInterval(loadAllTickers, 15000);
   setInterval(apRefreshServerStatus, 60000);
   setInterval(apPollServerLog, 60000);
   setInterval(loadPerfPanel, 600000);
-  setInterval(loadTopStepState, 30000);  // refresh TopStep state every 30s
-  setInterval(loadVixBadge, 300000);    // VIX refreshes every 5 min (cached server-side daily)
+  setInterval(loadTopStepState, 30000);
+  setInterval(loadVixBadge, 300000);
 
-  // ── Wake Lock: keep screen alive on mobile so polling never stops ──
   let _wakeLock = null;
   async function _requestWakeLock() {
     if (!('wakeLock' in navigator)) return;
@@ -3851,10 +3912,16 @@ window.addEventListener('load', ()=>{
     } catch(e) {}
   }
   _requestWakeLock();
-  // Re-acquire after tab becomes visible again (e.g. phone unlocked)
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') _requestWakeLock();
   });
+}
+
+// ── Init ─────────────────────────────────────────────────────────
+window.addEventListener('load', async ()=>{
+  const authed = await _checkAuth();
+  if (authed) _initApp();
+  // if not authed: _showLogin() was called; _initApp() runs after successful login
 });
 </script>
 </body>
