@@ -689,7 +689,7 @@ app.add_middleware(
 # ── HTTP Basic Auth middleware ─────────────────────────────────────── #
 # Set DASHBOARD_USER and DASHBOARD_PASS in Railway environment variables.
 # If neither is set the app runs open (backward-compatible for local dev).
-import base64 as _b64
+import os, base64 as _b64
 _DASH_USER = os.environ.get("DASHBOARD_USER", "")
 _DASH_PASS = os.environ.get("DASHBOARD_PASS", "")
 _AUTH_ENABLED = bool(_DASH_USER and _DASH_PASS)
