@@ -88,22 +88,38 @@ class PaperBroker:
 
             rows = conn.execute("""
                 SELECT id, symbol, direction, qty, entry_price,
-                       stop_loss, take_profit, opened_at, notes
+                       stop_loss, take_profit, opened_at, notes,
+                       COALESCE(target_1, 0.0)   AS target_1,
+                       COALESCE(be_moved, FALSE)  AS be_moved
                 FROM positions WHERE status = 'OPEN'
             """).fetchall()
             conn.close()
             for row in rows:
+                t1       = float(row[9])
+                be_moved = bool(row[10])
+
+                # ── Fallback T1: if DB has no target_1 (old row), infer it ──
+                # T1 sits halfway between entry and take_profit.
+                # This ensures partial-exit / BE-stop logic survives a restart
+                # even for positions created before this field was added.
+                entry_px = float(row[4])
+                tp_px    = float(row[6])
+                if t1 == 0.0 and tp_px != 0.0 and not be_moved:
+                    t1 = round(entry_px + (tp_px - entry_px) / 2.0, 4)
+
                 pos = Position(
-                    id          = row[0],
-                    symbol      = row[1],
-                    direction   = row[2],
-                    qty         = row[3],
-                    entry_price = row[4],
-                    stop_loss   = row[5],
-                    take_profit = row[6],
-                    opened_at   = row[7],
+                    id            = row[0],
+                    symbol        = row[1],
+                    direction     = row[2],
+                    qty           = row[3],
+                    entry_price   = entry_px,
+                    stop_loss     = float(row[5]),
+                    take_profit   = tp_px,
+                    target_1      = t1,
+                    be_moved      = be_moved,
+                    opened_at     = row[7],
                     strategy_used = (row[8] or "").split(":")[0].strip(),
-                    status      = "OPEN",
+                    status        = "OPEN",
                 )
                 self._positions[pos.id] = pos
         except Exception:
@@ -287,6 +303,25 @@ class PaperBroker:
                 (pos.direction == "SHORT" and current_price <= pos.take_profit)
             )
 
+            # ── Hard dollar-loss cap (data-delay protection) ──────────── #
+            # yfinance is 1-2 min delayed; stops can trigger late and price
+            # may have run far past the stop level before the bot sees it.
+            # If unrealized loss exceeds 1.3× the intended 1R risk, force-
+            # close NOW at current price rather than waiting for stop price.
+            # This caps the real loss to roughly 1.3R even on bad data days.
+            if not hit_stop and not hit_target:
+                risk_pts = abs(pos.entry_price - pos.stop_loss)
+                if risk_pts > 0:
+                    current_pnl = pos.pnl_at_price(current_price)
+                    max_loss    = risk_pts * pos.qty * 1.30  # 1.3× intended risk
+                    if current_pnl < -max_loss:
+                        _, msg, _ = self.close_position(pos.id, current_price, reason="max_loss_cap")
+                        messages.append(
+                            f"[MAX LOSS CAP] Closed early — unrealized loss "
+                            f"${current_pnl:+.2f} exceeded 1.3R cap | {msg}"
+                        )
+                        continue
+
             if hit_stop:
                 reason = "be_stopped" if pos.be_moved else "stop_loss"
                 _, msg, _ = self.close_position(pos.id, pos.stop_loss, reason=reason)
@@ -337,11 +372,13 @@ class PaperBroker:
         conn = duckdb.connect(self.db_path)
         conn.execute("""
             INSERT INTO positions
-            (id, symbol, direction, qty, entry_price, stop_loss, take_profit, opened_at, status, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, symbol, direction, qty, entry_price, stop_loss, take_profit,
+             target_1, be_moved, opened_at, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
             pos.id, pos.symbol, pos.direction, pos.qty,
             pos.entry_price, pos.stop_loss, pos.take_profit,
+            pos.target_1, pos.be_moved,
             pos.opened_at.isoformat(), pos.status,
             f"{pos.strategy_used}: {pos.ai_reasoning[:200]}"
         ])
@@ -364,9 +401,9 @@ class PaperBroker:
         conn.close()
 
     def _update_partial(self, pos: Position) -> None:
-        """Persist qty reduction + stop move after a partial exit."""
+        """Persist qty reduction + stop move + be_moved flag after a partial exit."""
         conn = duckdb.connect(self.db_path)
-        conn.execute("UPDATE positions SET qty=?, stop_loss=? WHERE id=?",
+        conn.execute("UPDATE positions SET qty=?, stop_loss=?, be_moved=TRUE WHERE id=?",
                      [pos.qty, pos.stop_loss, pos.id])
         conn.close()
 

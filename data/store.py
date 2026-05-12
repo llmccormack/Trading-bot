@@ -59,6 +59,8 @@ def init_db() -> None:
                     entry_price     DOUBLE NOT NULL,
                     stop_loss       DOUBLE,
                     take_profit     DOUBLE,
+                    target_1        DOUBLE DEFAULT 0.0,
+                    be_moved        BOOLEAN DEFAULT FALSE,
                     opened_at       TIMESTAMPTZ NOT NULL,
                     closed_at       TIMESTAMPTZ,
                     exit_price      DOUBLE,
@@ -68,6 +70,15 @@ def init_db() -> None:
                     PRIMARY KEY (id)
                 )
             """)
+            # Migrate older DBs that don't have the new columns yet
+            for _col_sql in [
+                "ALTER TABLE positions ADD COLUMN IF NOT EXISTS target_1 DOUBLE DEFAULT 0.0",
+                "ALTER TABLE positions ADD COLUMN IF NOT EXISTS be_moved BOOLEAN DEFAULT FALSE",
+            ]:
+                try:
+                    conn.execute(_col_sql)
+                except Exception:
+                    pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS trade_journal (
                     id              VARCHAR DEFAULT gen_random_uuid(),
