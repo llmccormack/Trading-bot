@@ -269,9 +269,12 @@ class PaperBroker:
                 if hit_t1:
                     half_qty    = pos.qty / 2.0
                     _slip       = _SLIPPAGE_PTS.get(pos.symbol, _DEFAULT_SLIP_PTS)
-                    # T1 partial: slight adverse slippage on exit + half of round-trip commission
+                    # T1 partial: slight adverse slippage on exit + full round-trip commission
+                    # applied to the half-position quantity.  close_position() later charges
+                    # commission on the runner qty — together they equal one full round-trip
+                    # per original contract (e.g. $5 × 0.5 + $5 × 0.5 = $5.00 total).
                     t1_fill     = pos.target_1 - _slip if pos.direction == "LONG" else pos.target_1 + _slip
-                    _comm_half  = _COMMISSION_RT.get(pos.symbol, _DEFAULT_COMMISSION_RT) * half_qty * 0.5
+                    _comm_half  = _COMMISSION_RT.get(pos.symbol, _DEFAULT_COMMISSION_RT) * half_qty
                     partial_pnl = (
                         (t1_fill - pos.entry_price) * half_qty if pos.direction == "LONG"
                         else (pos.entry_price - t1_fill) * half_qty

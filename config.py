@@ -46,6 +46,16 @@ class Settings(BaseSettings):
     topstep_max_contracts:    int   = Field(default=5)        # TopStep $50K = 5 mini / 50 micro hard cap
     topstep_min_trade_days:   int   = Field(default=10)       # min calendar days before profit target counts
 
+    # ── Per-strategy states ──────────────────────────────────────────────
+    # "paper"    = trades the paper broker (normal operation)
+    # "shadow"   = runs live_signal() and logs, but never executes a trade
+    # "disabled" = skipped entirely (no live_signal call)
+    # Override via .env (e.g. STRATEGY_FADE_RIP=shadow) without redeploying.
+    strategy_aplus:       str = Field(default="paper")    # A+ IB Retest — primary engine
+    strategy_orb:         str = Field(default="shadow")   # ORB — promoted once 30+ live trades logged
+    strategy_fade_rip:    str = Field(default="paper")    # Fade the Rip — best backtest edge (+24.1R)
+    strategy_vwap_pb:     str = Field(default="shadow")   # VWAP PB — pending honest re-test
+
     @property
     def is_paper(self) -> bool:
         return self.trading_mode == "paper"

@@ -154,7 +154,6 @@ class BacktestEngineAPlus:
                 # ── Normal management ─────────────────────────────── #
                 else:
                     # Partial exit at T1: book half, move stop to breakeven, let runner continue.
-                    # This mirrors PaperBroker.check_stops_and_targets exactly.
                     if not be_moved:
                         t1 = open_trade["t1"]
                         if (open_trade["dir"] == 1 and hi >= t1) or \
@@ -165,19 +164,35 @@ class BacktestEngineAPlus:
                             open_trade["t1_exited"]   = True
                             open_trade["sl"]          = open_trade["entry"]   # stop → BE
                             be_moved = True
-                            # Do NOT exit yet — runner continues to T2 or BE stop
+                            # Do NOT exit yet — runner continues
+
+                    # 1R ratchet trail on the runner — mirrors paper.py check_stops_and_targets.
+                    # R = abs(T1 − entry) / 2  (T1 ≈ entry + 2R, so this equals the original risk).
+                    # The stop ratchets up (longs) or down (shorts) 1R behind current price;
+                    # it never steps backward.  Active as soon as T1 is hit.
+                    if be_moved:
+                        _R = abs(open_trade["t1"] - open_trade["entry"]) / 2.0
+                        if _R > 0:
+                            if open_trade["dir"] == 1:
+                                _trail = hi - _R
+                                if _trail > open_trade["sl"]:
+                                    open_trade["sl"] = _trail
+                            else:
+                                _trail = lo + _R
+                                if _trail < open_trade["sl"]:
+                                    open_trade["sl"] = _trail
 
                     hit_t2   = (open_trade["dir"] ==  1 and hi >= open_trade["t2"]) or \
                                (open_trade["dir"] == -1 and lo <= open_trade["t2"])
                     hit_stop = (open_trade["dir"] ==  1 and lo <= open_trade["sl"]) or \
                                (open_trade["dir"] == -1 and hi >= open_trade["sl"])
 
-                    # Priority: stop > T2 > eod > timeout  (T1 is now a partial, not a full exit)
+                    # Priority: stop > T2 > eod > timeout  (T1 is a partial, not a full exit)
                     if hit_stop:
                         reason  = "be_stopped" if be_moved else "stop"
                         exit_px = open_trade["sl"]
                     elif hit_t2:
-                        # Only trail if price clearly breaks +1 ATR beyond T2
+                        # Switch to 0.8-ATR trailing only if price blew through T2 cleanly
                         _clear_break = (open_trade["dir"] == 1 and hi >= open_trade["t2"] + 1.0 * atr_now) or \
                                        (open_trade["dir"] == -1 and lo <= open_trade["t2"] - 1.0 * atr_now)
                         if _clear_break:

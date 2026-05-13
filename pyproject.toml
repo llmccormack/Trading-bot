@@ -34,3 +34,10 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.7.0",
 ]
+# Legacy Streamlit UI (dashboard/app.py).  The FastAPI HTML dashboard
+# (dashboard/api.py) is the primary interface and has no Streamlit dep.
+# Install with: uv pip install -e ".[streamlit-ui]"
+streamlit-ui = [
+    "streamlit>=1.40.0",
+    "streamlit-autorefresh>=1.0.1",
+]

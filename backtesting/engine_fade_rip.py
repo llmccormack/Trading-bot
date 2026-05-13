@@ -286,28 +286,39 @@ class FadeTheRipEngine:
         # Short: profit is downward movement
         # Stop hit (price went up through stop)
         if hi >= effective_stop:
-            exit_px = effective_stop
-            pnl     = entry - exit_px
-            r       = pnl / risk if risk > 0 else 0.0
-            return self._make_trade(trade, i, exit_px, "stop", pnl, r, bars_held, t1_hit)
+            exit_px    = effective_stop
+            runner_pnl = entry - exit_px          # 0 when stopped at BE
+            if t1_hit:
+                pnl = trade.get("partial_pnl", 0.0) + runner_pnl * 0.5
+            else:
+                pnl = runner_pnl
+            r      = pnl / risk if risk > 0 else 0.0
+            reason = "be_stopped" if t1_hit else "stop"
+            return self._make_trade(trade, i, exit_px, reason, pnl, r, bars_held, t1_hit)
 
-        # T1 hit
+        # T1 hit — book half position profit, store partial_pnl, signal caller to move stop
         if not t1_hit and lo <= t1:
+            trade["partial_pnl"] = (entry - t1) * 0.5   # short: entry > t1, so positive
             return "t1_hit"
 
-        # T2 hit (runner)
+        # T2 hit (runner — half position)
         if t1_hit and lo <= t2:
-            exit_px = t2
-            pnl     = entry - exit_px
-            r       = pnl / risk if risk > 0 else 0.0
+            exit_px    = t2
+            runner_pnl = entry - exit_px
+            pnl        = trade.get("partial_pnl", 0.0) + runner_pnl * 0.5
+            r          = pnl / risk if risk > 0 else 0.0
             return self._make_trade(trade, i, exit_px, "target2", pnl, r, bars_held, t1_hit)
 
         # EOD or timeout
         if eod or timeout:
-            exit_px = cl
-            pnl     = entry - exit_px
-            r       = pnl / risk if risk > 0 else 0.0
-            reason  = "eod" if eod else "timeout"
+            exit_px    = cl
+            runner_pnl = entry - exit_px
+            if t1_hit:
+                pnl = trade.get("partial_pnl", 0.0) + runner_pnl * 0.5
+            else:
+                pnl = runner_pnl
+            r      = pnl / risk if risk > 0 else 0.0
+            reason = "eod" if eod else "timeout"
             return self._make_trade(trade, i, exit_px, reason, pnl, r, bars_held, t1_hit)
 
         return None

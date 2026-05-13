@@ -131,24 +131,25 @@ class ORBEngine:
 
                 # ── Normal management ─────────────────────────────── #
                 else:
-                    # Breakeven: move stop to entry once T1 is touched
-                    if not be_moved:
-                        t1 = open_trade["t1"]
-                        if (open_trade["dir"] == 1 and hi >= t1) or \
-                           (open_trade["dir"] == -1 and lo <= t1):
+                    # Partial exit at T1: book half position, move stop to BE, run the rest
+                    if not open_trade.get("t1_exited", False):
+                        _t1 = open_trade["t1"]
+                        if (open_trade["dir"] == 1 and hi >= _t1) or \
+                           (open_trade["dir"] == -1 and lo <= _t1):
                             open_trade["sl"] = open_trade["entry"]
+                            open_trade["partial_pnl"] = (_t1 - open_trade["entry"]) * open_trade["dir"] * 0.5
+                            open_trade["t1_exited"] = True
                             be_moved = True
 
                     hit_t2   = (open_trade["dir"] ==  1 and hi >= open_trade["t2"]) or \
                                (open_trade["dir"] == -1 and lo <= open_trade["t2"])
-                    hit_t1   = (open_trade["dir"] ==  1 and hi >= open_trade["t1"]) or \
-                               (open_trade["dir"] == -1 and lo <= open_trade["t1"])
                     hit_stop = (open_trade["dir"] ==  1 and lo <= open_trade["sl"]) or \
                                (open_trade["dir"] == -1 and hi >= open_trade["sl"])
 
-                    # Priority: stop > T2 > T1 > eod > timeout
+                    # Priority: stop > T2 > eod > timeout
                     if hit_stop:
-                        exit_px, reason = open_trade["sl"], "stop"
+                        exit_px = open_trade["sl"]
+                        reason  = "be_stopped" if open_trade.get("t1_exited") else "stop"
                     elif hit_t2:
                         _clear_break = (open_trade["dir"] == 1 and hi >= open_trade["t2"] + 1.0 * atr_now) or \
                                        (open_trade["dir"] == -1 and lo <= open_trade["t2"] - 1.0 * atr_now)
@@ -159,8 +160,6 @@ class ORBEngine:
                             continue
                         else:
                             exit_px, reason = open_trade["t2"], "target2"
-                    elif hit_t1 and be_moved:
-                        exit_px, reason = open_trade["t1"], "target1"
                     elif eod:
                         exit_px, reason = cl, "eod"
                     elif timeout:
@@ -168,7 +167,11 @@ class ORBEngine:
                     else:
                         continue
 
-                pnl    = (exit_px - open_trade["entry"]) * open_trade["dir"]
+                _full_pnl = (exit_px - open_trade["entry"]) * open_trade["dir"]
+                if open_trade.get("t1_exited", False):
+                    pnl = open_trade["partial_pnl"] + _full_pnl * 0.5
+                else:
+                    pnl = _full_pnl
                 risk   = abs(open_trade["entry"] - open_trade["sl_orig"])
                 r_mult = pnl / risk if risk > 0 else 0.0
                 equity += pnl
@@ -226,17 +229,19 @@ class ORBEngine:
                 continue
 
             open_trade = {
-                "entry_bar": i,
-                "dir":       1 if direction == "BUY" else -1,
-                "entry":     entry,
-                "sl":        round(sl, 4),
-                "sl_orig":   round(sl, 4),
-                "t1":        round(t1, 4),
-                "t2":        round(t2, 4),
-                "score":     score,
-                "regime":    regime,
-                "t2_hit":    False,
-                "trail_sl":  None,
+                "entry_bar":   i,
+                "dir":         1 if direction == "BUY" else -1,
+                "entry":       entry,
+                "sl":          round(sl, 4),
+                "sl_orig":     round(sl, 4),
+                "t1":          round(t1, 4),
+                "t2":          round(t2, 4),
+                "score":       score,
+                "regime":      regime,
+                "t2_hit":      False,
+                "trail_sl":    None,
+                "t1_exited":   False,
+                "partial_pnl": 0.0,
             }
             _day_trade_count[_day_key] = _day_trade_count.get(_day_key, 0) + 1
             be_moved = False

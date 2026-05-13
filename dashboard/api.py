@@ -216,6 +216,55 @@ def _get_today_pnl() -> float:
     except Exception:
         return 0.0
 
+# ─────────────────────────────────────────────────────────────────────
+# STRATEGY STATE + HEALTH HELPERS
+# ─────────────────────────────────────────────────────────────────────
+
+def _strat_state(name: str) -> str:
+    """Return configured state for a strategy: 'paper' | 'shadow' | 'disabled'."""
+    _map = {
+        "aplus":          settings.strategy_aplus,
+        "orb":            settings.strategy_orb,
+        "fade_the_rip":   settings.strategy_fade_rip,
+        "vwap_pullback":  settings.strategy_vwap_pb,
+    }
+    return _map.get(name, "paper")
+
+
+def _check_strategy_health(strategy: str, min_trades: int = 15) -> tuple[str, float, int]:
+    """
+    Assess recent performance for a strategy using its last 20 closed trades.
+
+    Returns (status, avg_r, trade_count) where:
+      "ok"               — positive expectancy, trade normally
+      "degraded"         — avg R < 0 over last N trades (auto-shadow until it recovers)
+      "insufficient_data" — fewer than min_trades available (no action taken)
+    """
+    try:
+        conn = duckdb.connect(DB_PATH)
+        rows = conn.execute(
+            """SELECT r_multiple FROM trade_journal
+               WHERE strategy_used = ? AND r_multiple IS NOT NULL
+               ORDER BY closed_at DESC LIMIT 20""",
+            [strategy],
+        ).fetchall()
+        conn.close()
+    except Exception:
+        return "ok", 0.0, 0
+
+    if not rows:
+        return "insufficient_data", 0.0, 0
+
+    r_vals = [float(r[0]) for r in rows]
+    n      = len(r_vals)
+    avg_r  = sum(r_vals) / n
+
+    if n < min_trades:
+        return "insufficient_data", avg_r, n
+
+    return ("degraded" if avg_r < 0.0 else "ok"), avg_r, n
+
+
 def _ap_run_cycle(broker: "PaperBroker") -> None:
     """One scan cycle: check all symbols, execute paper trades on signals."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -228,48 +277,87 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             df     = fetch_historical(sym, "5m", days_back=58)
             snap   = get_live_price(root)
             cur_px = snap.get("last_price") if snap else None
-            engine = _make_live_engine(sym)
-            sig = engine.live_signal(df, current_price=cur_px)
 
-            _now_et = datetime.now(ZoneInfo("America/New_York"))
+            _now_et             = datetime.now(ZoneInfo("America/New_York"))
             _is_monday          = _now_et.weekday() == 0
             _is_power_hour_open = _now_et.hour == 14 and _now_et.minute < 30
             _index_sym          = sym not in _COMMODITY_SYMBOLS
+            _es_sym             = sym == "ES=F"
 
-            # ── ORB: 9:45–10:15 AM long-only, macro-filtered, skips Monday ──
-            # Fires before A+ takes over — fills the opening session gap.
-            if sig is None and _index_sym and not _is_monday:
-                orb_engine = ORBEngine(skip_monday=True)
-                sig = orb_engine.live_signal(df, current_price=cur_px)
+            sig: dict | None = None
 
-            # ── VWAP Pullback: ES only — NQ shows no edge in current regime ──
-            # Only run when no higher-priority signal fired and outside power hour.
-            # ── VWAP Pullback: SHADOW MODE — logs signals but does not trade ──
-            # Adjusted 60d expectancy is ~-0.04R (flat/negative after partial-exit
-            # accounting). Keeping it in observation until 30+ trades confirm an edge.
-            _es_sym = sym == "ES=F"
-            if _es_sym and not _is_monday and not _is_power_hour_open:
-                _vwap_shadow = VWAPPullbackEngine(skip_monday=True)
-                _vwap_sig    = _vwap_shadow.live_signal(df, current_price=cur_px)
-                if _vwap_sig:
-                    _aplog.info(
-                        f"[SHADOW VWAP PB] {sym} {_vwap_sig['direction']} "
-                        f"entry={_vwap_sig['entry']:.2f} stop={_vwap_sig['stop']:.2f} "
-                        f"score={_vwap_sig['score']:.2f} — not trading (shadow mode)"
+            # ── A+ / commodity engine (primary) ─────────────────────── #
+            _aplus_st = _strat_state("aplus")
+            if _aplus_st != "disabled":
+                _aplus_raw = _make_live_engine(sym).live_signal(df, current_price=cur_px)
+                if _aplus_raw:
+                    if _aplus_st == "shadow":
+                        _aplog.info(
+                            f"[SHADOW A+] {sym} {_aplus_raw['direction']} "
+                            f"entry={_aplus_raw['entry']:.2f} score={_aplus_raw['score']:.2f} — not trading"
+                        )
+                    else:
+                        sig = _aplus_raw
+
+            # ── ORB: 9:45–10:15 AM, skips Monday ───────────────────── #
+            _orb_st = _strat_state("orb")
+            if sig is None and _index_sym and not _is_monday and _orb_st != "disabled":
+                _orb_raw = ORBEngine(skip_monday=True).live_signal(df, current_price=cur_px)
+                if _orb_raw:
+                    if _orb_st == "shadow":
+                        _aplog.info(
+                            f"[SHADOW ORB] {sym} {_orb_raw['direction']} "
+                            f"entry={_orb_raw['entry']:.2f} score={_orb_raw['score']:.2f} — not trading"
+                        )
+                    else:
+                        sig = _orb_raw
+
+            # ── VWAP PB: ES only, outside power hour ────────────────── #
+            _vwap_st = _strat_state("vwap_pullback")
+            if _es_sym and not _is_monday and not _is_power_hour_open and _vwap_st != "disabled":
+                _vwap_raw = VWAPPullbackEngine(skip_monday=True).live_signal(df, current_price=cur_px)
+                if _vwap_raw:
+                    if _vwap_st == "shadow":
+                        _aplog.info(
+                            f"[SHADOW VWAP PB] {sym} {_vwap_raw['direction']} "
+                            f"entry={_vwap_raw['entry']:.2f} stop={_vwap_raw['stop']:.2f} "
+                            f"score={_vwap_raw['score']:.2f} — not trading (shadow mode)"
+                        )
+                    elif sig is None:
+                        sig = _vwap_raw
+
+            # ── Fade the Rip: short fallback, disabled in TopStep ────── #
+            _fade_st = _strat_state("fade_the_rip")
+            if (sig is None and _index_sym and not _is_monday and not _is_power_hour_open
+                    and not settings.topstep_mode and _fade_st != "disabled"):
+                _fade_raw = FadeTheRipEngine().live_signal(df, current_price=cur_px)
+                if _fade_raw:
+                    if _fade_st == "shadow":
+                        _aplog.info(
+                            f"[SHADOW FADE RIP] {sym} {_fade_raw['direction']} "
+                            f"entry={_fade_raw['entry']:.2f} score={_fade_raw['score']:.2f} — not trading"
+                        )
+                    else:
+                        sig = _fade_raw
+
+            # ── Degradation guard: auto-shadow if last 20 trades are negative ──
+            if sig is not None:
+                _strat_name = sig.get("strategy", "")
+                _dstatus, _davg_r, _dn = _check_strategy_health(_strat_name)
+                if _dstatus == "degraded":
+                    _aplog.warning(
+                        f"[DEGRADED] {_strat_name}: last {_dn} trades avg R={_davg_r:.3f} < 0 "
+                        f"— auto-shadow until expectancy recovers"
                     )
+                    sig = None
 
-            # ── Fade the Rip: short fallback (disabled in TopStep mode — no shorts) ──
-            if sig is None and _index_sym and not _is_monday and not _is_power_hour_open:
-                if not settings.topstep_mode:
-                    fade_engine = FadeTheRipEngine()
-                    sig = fade_engine.live_signal(df, current_price=cur_px)
-
-            # ── TopStep mode: enforce tighter score threshold ──
+            # ── TopStep mode: enforce tighter score threshold ────────── #
             if sig and settings.topstep_mode and sig.get("score", 1.0) < 0.75:
                 _aplog.info(
-                    f"SKIP {sym}: TopStep mode — score {sig["score"]:.2f} below 0.75 threshold"
+                    f"SKIP {sym}: TopStep mode — score {sig['score']:.2f} below 0.75 threshold"
                 )
                 sig = None
+
             # Auto-close stops/targets
             closed = broker.check_stops_and_targets(root, cur_px) if cur_px else []
             for msg in closed:
@@ -825,6 +913,34 @@ def root():
 @app.api_route("/api/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok", "time": datetime.utcnow().isoformat(), "paper": settings.is_paper}
+
+
+@app.get("/api/strategy-health")
+def strategy_health():
+    """
+    Return per-strategy state + recent performance health.
+    Used by the dashboard to display strategy status chips.
+    """
+    strategies = [
+        ("aplus",        "A+ IB Retest",   settings.strategy_aplus),
+        ("orb",          "ORB",             settings.strategy_orb),
+        ("fade_the_rip", "Fade the Rip",    settings.strategy_fade_rip),
+        ("vwap_pullback", "VWAP Pullback",  settings.strategy_vwap_pb),
+    ]
+    out = []
+    for name, label, state in strategies:
+        dstatus, avg_r, n_trades = _check_strategy_health(name)
+        effective = "shadow" if dstatus == "degraded" and state == "paper" else state
+        out.append({
+            "name":      name,
+            "label":     label,
+            "state":     state,           # config state
+            "effective": effective,       # may be demoted to shadow by degradation
+            "health":    dstatus,         # "ok" | "degraded" | "insufficient_data"
+            "avg_r":     round(avg_r, 3),
+            "n_trades":  n_trades,
+        })
+    return {"strategies": out}
 
 
 # ─────────────────────────────────────────────────────────────────────
