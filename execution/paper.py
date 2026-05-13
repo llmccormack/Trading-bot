@@ -17,7 +17,25 @@ from risk.manager import RiskManager, TradeRequest, RiskValidation
 OrderSide = Literal["BUY", "SELL"]
 PositionStatus = Literal["OPEN", "CLOSED"]
 
-SLIPPAGE_PCT = 0.0005  # 0.05% simulated slippage on fills
+# Realistic futures slippage: 1 tick per fill (entry + exit = 2 ticks round-trip).
+# Using points rather than %, which is the correct model for futures.
+# ES 1 tick = 0.25 pts = $12.50/contract. The old 0.05% model was $137/contract — way off.
+_SLIPPAGE_PTS: dict[str, float] = {
+    "ES":  0.25,   # 1 tick = 0.25 pts = $12.50/contract
+    "NQ":  0.25,   # 1 tick = 0.25 pts = $5.00/contract
+    "GC":  0.10,   # 1 tick = 0.10 pts = $10.00/contract
+    "CL":  0.01,   # 1 tick = 0.01 pts = $10.00/contract
+    "RTY": 0.10,
+    "YM":  1.00,   # 1 tick = 1 pt = $5.00/contract
+}
+_DEFAULT_SLIP_PTS = 0.25
+
+# Round-trip commission per contract (exchange + clearing + brokerage est.)
+_COMMISSION_RT: dict[str, float] = {
+    "ES": 5.00, "NQ": 5.00, "GC": 5.00,
+    "CL": 7.00, "RTY": 5.00, "YM": 5.00,
+}
+_DEFAULT_COMMISSION_RT = 5.00
 
 
 @dataclass
@@ -165,8 +183,9 @@ class PaperBroker:
         if not validation.approved:
             return False, f"Risk check failed: {validation.rejection_reason}", None
 
-        # Simulate slippage
-        fill_price = entry_price * (1 + SLIPPAGE_PCT) if direction == "BUY" else entry_price * (1 - SLIPPAGE_PCT)
+        # Simulate 1-tick slippage on entry (points, not %)
+        _slip = _SLIPPAGE_PTS.get(symbol, _DEFAULT_SLIP_PTS)
+        fill_price = entry_price + _slip if direction == "BUY" else entry_price - _slip
 
         pos = Position(
             symbol=symbol,
@@ -207,9 +226,11 @@ class PaperBroker:
         if pos.status == "CLOSED":
             return False, "Position already closed", 0.0
 
-        # Simulate slippage on exit
-        fill = exit_price * (1 - SLIPPAGE_PCT) if pos.direction == "LONG" else exit_price * (1 + SLIPPAGE_PCT)
-        pnl = pos.pnl_at_price(round(fill, 4))
+        # Simulate 1-tick slippage on exit + round-trip commission
+        _slip = _SLIPPAGE_PTS.get(pos.symbol, _DEFAULT_SLIP_PTS)
+        fill  = exit_price - _slip if pos.direction == "LONG" else exit_price + _slip
+        commission = _COMMISSION_RT.get(pos.symbol, _DEFAULT_COMMISSION_RT) * pos.qty
+        pnl = pos.pnl_at_price(round(fill, 4)) - commission
 
         pos.exit_price = round(fill, 4)
         pos.realized_pnl = round(pnl, 2)
@@ -247,11 +268,14 @@ class PaperBroker:
                 )
                 if hit_t1:
                     half_qty    = pos.qty / 2.0
-                    t1_fill     = pos.target_1
+                    _slip       = _SLIPPAGE_PTS.get(pos.symbol, _DEFAULT_SLIP_PTS)
+                    # T1 partial: slight adverse slippage on exit + half of round-trip commission
+                    t1_fill     = pos.target_1 - _slip if pos.direction == "LONG" else pos.target_1 + _slip
+                    _comm_half  = _COMMISSION_RT.get(pos.symbol, _DEFAULT_COMMISSION_RT) * half_qty * 0.5
                     partial_pnl = (
                         (t1_fill - pos.entry_price) * half_qty if pos.direction == "LONG"
                         else (pos.entry_price - t1_fill) * half_qty
-                    )
+                    ) - _comm_half
                     old_stop      = pos.stop_loss
                     pos.qty       = half_qty          # runner: half position remains
                     pos.stop_loss = pos.entry_price   # move to break-even

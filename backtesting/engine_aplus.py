@@ -153,24 +153,29 @@ class BacktestEngineAPlus:
 
                 # ── Normal management ─────────────────────────────── #
                 else:
-                    # Breakeven: move stop to entry once T1 is touched
+                    # Partial exit at T1: book half, move stop to breakeven, let runner continue.
+                    # This mirrors PaperBroker.check_stops_and_targets exactly.
                     if not be_moved:
                         t1 = open_trade["t1"]
                         if (open_trade["dir"] == 1 and hi >= t1) or \
                            (open_trade["dir"] == -1 and lo <= t1):
-                            open_trade["sl"] = open_trade["entry"]
+                            # Half-position exits at T1
+                            t1_pnl = (t1 - open_trade["entry"]) * open_trade["dir"] * 0.5
+                            open_trade["partial_pnl"] = t1_pnl
+                            open_trade["t1_exited"]   = True
+                            open_trade["sl"]          = open_trade["entry"]   # stop → BE
                             be_moved = True
+                            # Do NOT exit yet — runner continues to T2 or BE stop
 
                     hit_t2   = (open_trade["dir"] ==  1 and hi >= open_trade["t2"]) or \
                                (open_trade["dir"] == -1 and lo <= open_trade["t2"])
-                    hit_t1   = (open_trade["dir"] ==  1 and hi >= open_trade["t1"]) or \
-                               (open_trade["dir"] == -1 and lo <= open_trade["t1"])
                     hit_stop = (open_trade["dir"] ==  1 and lo <= open_trade["sl"]) or \
                                (open_trade["dir"] == -1 and hi >= open_trade["sl"])
 
-                    # Priority: stop > T2 > T1 > eod > timeout
+                    # Priority: stop > T2 > eod > timeout  (T1 is now a partial, not a full exit)
                     if hit_stop:
-                        exit_px, reason = open_trade["sl"], "stop"
+                        reason  = "be_stopped" if be_moved else "stop"
+                        exit_px = open_trade["sl"]
                     elif hit_t2:
                         # Only trail if price clearly breaks +1 ATR beyond T2
                         _clear_break = (open_trade["dir"] == 1 and hi >= open_trade["t2"] + 1.0 * atr_now) or \
@@ -182,8 +187,6 @@ class BacktestEngineAPlus:
                             continue
                         else:
                             exit_px, reason = open_trade["t2"], "target2"
-                    elif hit_t1 and be_moved:
-                        exit_px, reason = open_trade["t1"], "target1"
                     elif eod:
                         exit_px, reason = cl, "eod"
                     elif timeout:
@@ -191,7 +194,13 @@ class BacktestEngineAPlus:
                     else:
                         continue  # stay in trade
 
-                pnl  = (exit_px - open_trade["entry"]) * open_trade["dir"]
+                # ── PnL accounting (handles partial + runner) ─────── #
+                runner_pnl = (exit_px - open_trade["entry"]) * open_trade["dir"]
+                if open_trade.get("t1_exited"):
+                    # T1 partial already booked; only half-position is left as runner
+                    pnl = open_trade["partial_pnl"] + runner_pnl * 0.5
+                else:
+                    pnl = runner_pnl   # full position, no partial taken
                 risk = abs(open_trade["entry"] - open_trade["sl_orig"])
                 r_mult = pnl / risk if risk > 0 else 0.0
                 equity += pnl
@@ -255,17 +264,19 @@ class BacktestEngineAPlus:
                     continue
 
             open_trade = {
-                "entry_bar": i,
-                "dir":       1 if direction == "BUY" else -1,
-                "entry":     entry,
-                "sl":        round(sl, 4),
-                "sl_orig":   round(sl, 4),
-                "t1":        round(t1, 4),
-                "t2":        round(t2, 4),
-                "score":     score,
-                "regime":    regime,
-                "t2_hit":    False,
-                "trail_sl":  None,
+                "entry_bar":   i,
+                "dir":         1 if direction == "BUY" else -1,
+                "entry":       entry,
+                "sl":          round(sl, 4),
+                "sl_orig":     round(sl, 4),
+                "t1":          round(t1, 4),
+                "t2":          round(t2, 4),
+                "score":       score,
+                "regime":      regime,
+                "t2_hit":      False,
+                "trail_sl":    None,
+                "t1_exited":   False,   # True once half-position exits at T1
+                "partial_pnl": 0.0,     # PnL booked at the T1 partial exit
             }
             _day_trade_count[_day_key] = _day_trade_count.get(_day_key, 0) + 1
             be_moved = False

@@ -244,10 +244,19 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
 
             # ── VWAP Pullback: ES only — NQ shows no edge in current regime ──
             # Only run when no higher-priority signal fired and outside power hour.
+            # ── VWAP Pullback: SHADOW MODE — logs signals but does not trade ──
+            # Adjusted 60d expectancy is ~-0.04R (flat/negative after partial-exit
+            # accounting). Keeping it in observation until 30+ trades confirm an edge.
             _es_sym = sym == "ES=F"
-            if sig is None and _es_sym and not _is_monday and not _is_power_hour_open:
-                vwap_engine = VWAPPullbackEngine(skip_monday=True)
-                sig = vwap_engine.live_signal(df, current_price=cur_px)
+            if _es_sym and not _is_monday and not _is_power_hour_open:
+                _vwap_shadow = VWAPPullbackEngine(skip_monday=True)
+                _vwap_sig    = _vwap_shadow.live_signal(df, current_price=cur_px)
+                if _vwap_sig:
+                    _aplog.info(
+                        f"[SHADOW VWAP PB] {sym} {_vwap_sig['direction']} "
+                        f"entry={_vwap_sig['entry']:.2f} stop={_vwap_sig['stop']:.2f} "
+                        f"score={_vwap_sig['score']:.2f} — not trading (shadow mode)"
+                    )
 
             # ── Fade the Rip: short fallback (disabled in TopStep mode — no shorts) ──
             if sig is None and _index_sym and not _is_monday and not _is_power_hour_open:
