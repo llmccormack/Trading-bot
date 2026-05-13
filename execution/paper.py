@@ -122,6 +122,12 @@ class PaperBroker:
                     status        = "OPEN",
                 )
                 self._positions[pos.id] = pos
+
+            # Sync the risk manager's open-position counter so the concurrent-
+            # position limit is accurate after a restart.  Without this the
+            # counter stays at 0 even when positions were reloaded, allowing
+            # the bot to open more trades than max_concurrent_positions allows.
+            self.risk_manager._open_positions = len(self._positions)
         except Exception:
             pass  # DB not ready yet — positions start empty, no problem
 

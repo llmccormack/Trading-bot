@@ -36,14 +36,8 @@ from backtesting.engine_vwap_pullback import VWAPPullbackEngine
 from utils.indicators import add_all, get_key_levels
 import duckdb
 
-init_db()
-
-# Seed historical trades if DB is empty (survives Railway redeploys)
-try:
-    from seed_trades import seed as _seed_trades
-    _seed_trades()
-except Exception:
-    pass
+# DB init and seeding are deferred to lifespan startup (not import time)
+# so that importing this module in tests has no side effects.
 
 # ─────────────────────────────────────────────────────────────────────
 # PER-SYMBOL ENGINE ROUTING
@@ -676,9 +670,19 @@ def _ap_background_loop(broker_ref_fn) -> None:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    # Enforce single-instance — kill any previously running autopilot process
+    global _broker, _agent
+    # ── DB init + seed (moved from module level to avoid import side-effects) ──
+    init_db()
+    try:
+        from seed_trades import seed as _seed_trades
+        _seed_trades()
+    except Exception:
+        pass
+    # ── Broker + agent (moved from module level for same reason) ──────────────
+    _broker = _make_broker()
+    _agent  = TradingAgent()
+    # ── Enforce single autopilot instance, then start background loop ─────────
     _enforce_single_instance()
-    # Start the server-side autopilot in a background daemon thread
     t = threading.Thread(
         target=_ap_background_loop,
         args=(lambda: _broker,),
@@ -797,9 +801,9 @@ def _make_broker():
     _aplog.info("Broker: Paper trading")
     return PaperBroker(risk_manager=rm)
 
-# ── Shared in-memory state (single-process, dev mode) ──────────────── #
-_broker  = _make_broker()
-_agent   = TradingAgent()
+# ── Shared in-memory state — initialised in lifespan, not at import ── #
+_broker: "PaperBroker | None" = None
+_agent:  "TradingAgent | None" = None
 _last_agg: dict = {}
 
 # ─────────────────────────────────────────────────────────────────────
