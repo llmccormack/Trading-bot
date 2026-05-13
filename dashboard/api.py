@@ -723,12 +723,17 @@ _AUTH_BYPASS = {"/api/health", "/api/login"}
 
 class _SessionAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: _Request, call_next):
-        if request.url.path.rstrip("/") in _AUTH_BYPASS:
+        path = request.url.path.rstrip("/") or "/"
+        # Static files and the root HTML page are always public —
+        # the login overlay inside the HTML handles the auth gate.
+        if not path.startswith("/api"):
             return await call_next(request)
+        # Public API endpoints (login + health check)
+        if path in _AUTH_BYPASS:
+            return await call_next(request)
+        # All other /api/* routes require a valid session cookie
         if request.cookies.get("ra_session") in _SESSIONS:
             return await call_next(request)
-        # Return 401 JSON for API calls, 403 HTML for page loads
-        # (the frontend login overlay intercepts both)
         return _Response("Unauthorized", status_code=401)
 
 if _AUTH_ENABLED:
