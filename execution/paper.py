@@ -3,6 +3,7 @@ Paper trading engine — simulates order execution with realistic fills.
 Tracks positions, P&L, and writes to the trade journal.
 """
 from __future__ import annotations
+import re
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +17,22 @@ from risk.manager import RiskManager, TradeRequest, RiskValidation
 
 OrderSide = Literal["BUY", "SELL"]
 PositionStatus = Literal["OPEN", "CLOSED"]
+
+
+def _parse_regime(text: str) -> dict:
+    """Extract regime fields from an ai_reasoning string.
+
+    Expects key=value pairs anywhere in the string, e.g.:
+      "Server autopilot | score=0.87 | ... | vix=16.2 atr_pct=95 adx=22 tod=primary market=trending"
+
+    Returns a dict; absent fields are None so callers can insert NULL.
+    """
+    out: dict = {}
+    for key in ("tod", "market", "atr_pct", "adx", "vix"):
+        m = re.search(rf"{key}=(\S+)", text or "")
+        if m:
+            out[key] = m.group(1)
+    return out
 
 # Realistic futures slippage: 1 tick per fill (entry + exit = 2 ticks round-trip).
 # Using points rather than %, which is the correct model for futures.
@@ -504,6 +521,14 @@ class PaperBroker:
         total_pnl    = (pos.partial_pnl_booked or 0.0) + (pos.realized_pnl or 0.0)
         r_multiple   = total_pnl / initial_risk if initial_risk > 0 else None
 
+        # Parse regime tags logged in ai_reasoning into queryable columns.
+        reg     = _parse_regime(pos.ai_reasoning or "")
+        _tod    = reg.get("tod")
+        _market = reg.get("market")
+        _atr_pct = int(reg["atr_pct"])   if "atr_pct" in reg else None
+        _adx     = float(reg["adx"])     if "adx"     in reg else None
+        _vix     = float(reg["vix"])     if "vix"     in reg else None
+
         conn = duckdb.connect(self.db_path)
         # Guard: skip if a full-close journal entry already exists for this position
         existing = conn.execute(
@@ -516,13 +541,15 @@ class PaperBroker:
         conn.execute("""
             INSERT INTO trade_journal
             (id, position_id, symbol, direction, entry_price, exit_price, qty,
-             pnl, r_multiple, strategy_used, ai_reasoning, opened_at, closed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             pnl, r_multiple, strategy_used, ai_reasoning, opened_at, closed_at,
+             tod, market, atr_pct, adx, vix)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
             str(uuid.uuid4()), pos.id, pos.symbol, pos.direction,
             pos.entry_price, pos.exit_price, original_qty,
             round(total_pnl, 2), r_multiple,
             pos.strategy_used, pos.ai_reasoning[:500],
-            pos.opened_at.isoformat(), pos.closed_at.isoformat()
+            pos.opened_at.isoformat(), pos.closed_at.isoformat(),
+            _tod, _market, _atr_pct, _adx, _vix,
         ])
         conn.close()

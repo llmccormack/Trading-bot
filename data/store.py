@@ -98,9 +98,26 @@ def init_db() -> None:
                     ai_reasoning    TEXT,
                     opened_at       TIMESTAMPTZ,
                     closed_at       TIMESTAMPTZ,
+                    tod             VARCHAR,
+                    market          VARCHAR,
+                    atr_pct         INTEGER,
+                    adx             DOUBLE,
+                    vix             DOUBLE,
                     PRIMARY KEY (id)
                 )
             """)
+            # Migrate older DBs that don't have the regime columns yet
+            for _col_sql in [
+                "ALTER TABLE trade_journal ADD COLUMN IF NOT EXISTS tod     VARCHAR",
+                "ALTER TABLE trade_journal ADD COLUMN IF NOT EXISTS market  VARCHAR",
+                "ALTER TABLE trade_journal ADD COLUMN IF NOT EXISTS atr_pct INTEGER",
+                "ALTER TABLE trade_journal ADD COLUMN IF NOT EXISTS adx     DOUBLE",
+                "ALTER TABLE trade_journal ADD COLUMN IF NOT EXISTS vix     DOUBLE",
+            ]:
+                try:
+                    conn.execute(_col_sql)
+                except Exception:
+                    pass
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS shadow_signals (
                     id              VARCHAR PRIMARY KEY,

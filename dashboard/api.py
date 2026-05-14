@@ -2210,7 +2210,8 @@ def get_journal(limit: int = 200):
         jdf  = conn.execute(f"""
             SELECT symbol, direction, entry_price, exit_price, qty,
                    pnl, r_multiple, strategy_used, opened_at, closed_at,
-                   ai_reasoning
+                   ai_reasoning,
+                   tod, market, atr_pct, adx, vix
             FROM trade_journal ORDER BY opened_at DESC LIMIT {limit}
         """).df()
         conn.close()
@@ -2407,3 +2408,113 @@ def shadow_performance():
         }
 
     return out
+
+
+# ─────────────────────────────────────────────────────────────────────
+# REGIME STATS  — per-bucket performance from trade_journal
+# ─────────────────────────────────────────────────────────────────────
+@app.get("/api/regime-stats")
+def regime_stats(days: int = 60, strategy: str = ""):
+    """
+    Return trade performance sliced by regime bucket.
+
+    Query params:
+      days     — look-back window (default 60)
+      strategy — filter to one strategy slug (default: all)
+
+    Response shape:
+      {
+        "by_tod":       [{tod, trades, win_rate, avg_r, profit_factor}, ...],
+        "by_market":    [{market, trades, win_rate, avg_r, profit_factor}, ...],
+        "by_atr_bucket":[{bucket, atr_pct_range, trades, win_rate, avg_r, profit_factor}, ...],
+        "note": "Only trades with regime columns populated are included."
+      }
+
+    Older journal rows (pre-migration) will have NULL regime columns and are
+    excluded from this endpoint; they still appear in /api/journal.
+    """
+    try:
+        conn = duckdb.connect(DB_PATH)
+        strat_filter = "AND strategy_used = ?" if strategy else ""
+        params: list = [days]
+        if strategy:
+            params.append(strategy)
+
+        rows = conn.execute(f"""
+            SELECT pnl, r_multiple, tod, market, atr_pct
+            FROM trade_journal
+            WHERE closed_at >= NOW() - INTERVAL '{days}' DAY
+              AND ai_reasoning != 'partial_exit_t1'
+              AND tod IS NOT NULL
+              {strat_filter}
+        """, params).fetchall()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(500, f"regime_stats DB error: {e}")
+
+    if not rows:
+        return {"by_tod": [], "by_market": [], "by_atr_bucket": [],
+                "note": "No trades with regime data yet."}
+
+    def _bucket_stats(groups: dict) -> list[dict]:
+        out = []
+        for label, trades in sorted(groups.items()):
+            total = len(trades)
+            wins  = sum(1 for p, _ in trades if p > 0)
+            gw    = sum(p for p, _ in trades if p > 0)
+            gl    = abs(sum(p for p, _ in trades if p <= 0))
+            avg_r = round(sum(r for _, r in trades) / total, 3) if total else 0.0
+            pf    = round(gw / gl, 3) if gl > 0 else 9.999
+            out.append({
+                "bucket":        label,
+                "trades":        total,
+                "win_rate":      round(wins / total, 3),
+                "avg_r":         avg_r,
+                "profit_factor": pf,
+            })
+        return out
+
+    # ── Group by tod ─────────────────────────────────────────────────
+    tod_groups: dict = {}
+    market_groups: dict = {}
+    atr_groups: dict = {}
+    ATR_BUCKETS = [("low (<70)", lambda p: p < 70),
+                   ("normal (70–130)", lambda p: 70 <= p <= 130),
+                   ("spike (>130)", lambda p: p > 130)]
+
+    for pnl, r_mult, tod, market, atr_pct in rows:
+        pnl    = pnl    or 0.0
+        r_mult = r_mult or 0.0
+
+        if tod:
+            tod_groups.setdefault(tod, []).append((pnl, r_mult))
+        if market:
+            market_groups.setdefault(market, []).append((pnl, r_mult))
+        if atr_pct is not None:
+            for label, test in ATR_BUCKETS:
+                if test(atr_pct):
+                    atr_groups.setdefault(label, []).append((pnl, r_mult))
+                    break
+
+    # Rename tod keys for readability and sort by session order
+    TOD_ORDER = ["open", "primary", "lunch", "power_hour", "eod"]
+    by_tod = sorted(
+        _bucket_stats(tod_groups),
+        key=lambda x: TOD_ORDER.index(x["bucket"]) if x["bucket"] in TOD_ORDER else 99,
+    )
+    # Rename bucket → tod/market for frontend clarity
+    for row in by_tod:
+        row["tod"] = row.pop("bucket")
+    by_market = _bucket_stats(market_groups)
+    for row in by_market:
+        row["market"] = row.pop("bucket")
+    by_atr = _bucket_stats(atr_groups)
+    for row in by_atr:
+        row["atr_bucket"] = row.pop("bucket")
+
+    return {
+        "by_tod":        by_tod,
+        "by_market":     by_market,
+        "by_atr_bucket": by_atr,
+        "note": f"Includes {len(rows)} trades with regime data from last {days} days.",
+    }
