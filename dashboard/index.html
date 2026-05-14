@@ -1473,6 +1473,7 @@ a:hover { color: var(--accent); }
         <span>🖥 Server: loading…</span>
       </div>
       <button id="topstepToggleBtn" onclick="toggleTopStepMode(true)" title="Enable TopStep Combine Mode" style="margin-left:auto;font-size:10px;padding:4px 12px;background:rgba(255,180,0,0.1);border:1px solid rgba(255,180,0,0.3);border-radius:6px;color:#FFB400;cursor:pointer;font-weight:600;white-space:nowrap;">🏆 Combine Mode</button>
+      <button onclick="resetPaperAccount()" title="Wipe all journal data and reset balance to $100K" style="font-size:10px;padding:4px 12px;background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:6px;color:#ef4444;cursor:pointer;font-weight:600;white-space:nowrap;">🔄 Reset $100K</button>
     </div>
 
     <div id="apAlertBox"></div>
@@ -2129,6 +2130,25 @@ async function toggleTopStepMode(enable) {
     const d = await r.json();
     if (d.ok) await loadTopStepState();
   } catch(e) { alert('TopStep toggle failed: ' + e.message); }
+}
+
+async function resetPaperAccount() {
+  const ok = confirm(
+    '⚠️ Reset paper account to $100K?\n\n' +
+    'This permanently deletes ALL journal history and open positions.\n' +
+    'This cannot be undone.'
+  );
+  if (!ok) return;
+  try {
+    const r = await fetch(API + '/api/admin/reset-paper', { method: 'POST' });
+    const d = await r.json();
+    if (d.ok) {
+      alert(`✅ Done — account reset to $${d.account_balance.toLocaleString()}`);
+      location.reload();
+    } else {
+      alert('Reset failed: ' + JSON.stringify(d));
+    }
+  } catch(e) { alert('Reset failed: ' + e.message); }
 }
 
 async function loadPerfPanel() {
