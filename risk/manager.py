@@ -15,6 +15,7 @@ class TradeRequest:
     stop_loss: float
     take_profit: float
     account_balance: float
+    risk_multiplier: float = 1.0   # score-tier scaling: 0.5 / 0.75 / 1.0 / 1.25
 
 
 @dataclass
@@ -88,8 +89,9 @@ class RiskManager:
                 rejection_reason=f"R:R {r_ratio:.1f}:1 below minimum {self.min_rr}:1"
             )
 
-        # 4. Calculate position size (fixed fractional — risk X% of account)
-        max_dollar_risk = req.account_balance * (self.max_risk_pct / 100)
+        # 4. Calculate position size (fixed fractional — risk X% of account,
+        #    scaled by per-signal risk_multiplier from score-tier logic)
+        max_dollar_risk = req.account_balance * (self.max_risk_pct / 100) * max(0.0, req.risk_multiplier)
         position_size = max_dollar_risk / risk_per_unit
         position_size = max(1, round(position_size))  # minimum 1 unit
 

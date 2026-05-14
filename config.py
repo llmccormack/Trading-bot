@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     strategy_aplus:       str = Field(default="paper")    # A+ IB Retest — primary engine
     strategy_orb:         str = Field(default="shadow")   # ORB — promoted once 30+ live trades logged
     strategy_fade_rip:    str = Field(default="paper")    # Fade the Rip — best backtest edge (+24.1R)
-    strategy_vwap_pb:     str = Field(default="shadow")   # VWAP PB — pending honest re-test
+    strategy_vwap_pb:     str = Field(default="disabled")  # VWAP PB — +0.37R/4 trades, not earning its place
 
     @property
     def is_paper(self) -> bool:

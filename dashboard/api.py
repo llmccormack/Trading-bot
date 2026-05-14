@@ -27,6 +27,7 @@ from execution.paper import PaperBroker
 from execution.tradovate import TradovateBroker
 from ai.agent import TradingAgent
 from data.store import init_db, DB_PATH, get_open_positions
+from backtesting.trade_sim import TradeSimulator
 from backtesting.engine import BacktestEngine
 from backtesting.engine_5m import BacktestEngine5m, run_multi_market, FUTURES_UNIVERSE
 from backtesting.engine_aplus import BacktestEngineAPlus, APLUS_UNIVERSE
@@ -231,6 +232,45 @@ def _strat_state(name: str) -> str:
     return _map.get(name, "paper")
 
 
+def _score_to_risk_mult(sig: dict) -> float:
+    """
+    Convert strategy + composite score to a position-size multiplier.
+
+    Applied on top of max_risk_per_trade_pct so the base config stays
+    unchanged — we just press harder on high-confidence setups.
+
+    Tiers
+    -----
+    A+   score ≥ 0.85 → 1.25× (A-grade conviction, press it)
+    A+   score ≥ 0.80 → 1.00× (solid, standard size)
+    A+   score < 0.80 → 0.50× (borderline pass, half-size)
+
+    Fade score ≥ 0.80 → 1.00× (premium: strong rejection candle)
+    Fade score < 0.80 → 0.75× (normal: still profitable but less edge)
+
+    ORB  any score     → 0.50× (unproven sample — half until PF > 1.8)
+
+    Others             → 0.50× (conservative default)
+    """
+    strategy = sig.get("strategy", "")
+    score    = float(sig.get("score", 0.75))
+
+    if strategy == "aplus":
+        if score >= 0.85:
+            return 1.25
+        if score >= 0.80:
+            return 1.0
+        return 0.5                  # 0.75–0.80: marginal pass, half-size
+
+    if strategy == "fade_the_rip":
+        return 1.0 if score >= 0.80 else 0.75
+
+    if strategy == "orb":
+        return 0.5                  # half until 25+ shadow trades confirm edge
+
+    return 0.5                      # default: conservative
+
+
 def _check_strategy_health(strategy: str, min_trades: int = 15) -> tuple[str, float, int]:
     """
     Assess recent performance for a strategy using its last 20 closed trades.
@@ -270,8 +310,26 @@ def _check_strategy_health(strategy: str, min_trades: int = 15) -> tuple[str, fl
 def _ap_run_cycle(broker: "PaperBroker") -> None:
     """One scan cycle: check all symbols, execute paper trades on signals."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from utils.event_calendar import is_news_blackout_today
 
     today_str = datetime.now(_AP_ET).strftime("%Y-%m-%d")
+
+    # ── News/event blackout ──────────────────────────────────────────── #
+    _blackout, _blackout_reason = is_news_blackout_today()
+    if _blackout:
+        _aplog.info(f"CYCLE SKIP: {_blackout_reason}")
+        # Still run stop/target checks on open positions — just no new entries.
+        for sym in _AP_SYMBOLS:
+            try:
+                root   = sym.replace("=F", "")
+                snap   = get_live_price(root)
+                cur_px = snap.get("last_price") if snap else None
+                if cur_px:
+                    for msg in broker.check_stops_and_targets(root, cur_px):
+                        _aplog.info(f"AUTO-CLOSE {sym}: {msg}")
+            except Exception:
+                pass
+        return
 
     def _check(sym: str) -> dict:
         try:
@@ -282,6 +340,12 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
 
             _now_et             = datetime.now(ZoneInfo("America/New_York"))
             _is_monday          = _now_et.weekday() == 0
+
+            # ── Tick open shadow positions for this symbol ───────────── #
+            if cur_px and "atr" in df.columns:
+                _atr_now = float(df["atr"].iloc[-1])
+                _h, _m   = _now_et.hour, _now_et.minute
+                _tick_shadow_positions(root, cur_px, _atr_now, eod=(_h >= 15 and _m >= 55))
             _is_power_hour_open = _now_et.hour == 14 and _now_et.minute < 30
             _index_sym          = sym not in _COMMODITY_SYMBOLS
             _es_sym             = sym == "ES=F"
@@ -311,6 +375,8 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                             f"[SHADOW ORB] {sym} {_orb_raw['direction']} "
                             f"entry={_orb_raw['entry']:.2f} score={_orb_raw['score']:.2f} — not trading"
                         )
+                        atr_now = float(df["atr"].iloc[-1]) if "atr" in df.columns else 0.0
+                        _open_shadow_position("orb", root, _orb_raw, atr_now)
                     else:
                         sig = _orb_raw
 
@@ -396,16 +462,41 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                         tags     = "stop_sign",
                         priority = "high",
                     )
-            return {"sym": sym, "sig": sig, "root": root, "cur_px": cur_px}
+            # ── Regime tags: logged with every executed trade ──────────── #
+            _rtags = ""
+            try:
+                _atr     = float(df["atr"].iloc[-1])
+                _atr_avg = float(df["atr_avg20"].iloc[-1]) if "atr_avg20" in df.columns else _atr
+                _atr_pct = int(_atr / _atr_avg * 100) if _atr_avg > 0 else 100
+                _adx_val = float(df["adx"].iloc[-1]) if "adx" in df.columns else 0.0
+                _vix_now = _VIX_CACHE.get("vix", 0.0)
+                _h, _m   = _now_et.hour, _now_et.minute
+                _tod = (
+                    "open"       if _h < 10 or (_h == 10 and _m < 15) else
+                    "primary"    if _h < 11 or (_h == 11 and _m < 30) else
+                    "lunch"      if _h < 14 else
+                    "power_hour" if _h < 15 or (_h == 15 and _m < 30) else
+                    "eod"
+                )
+                _trend = "trending" if _adx_val >= 20 else "ranging"
+                _rtags = (
+                    f"vix={_vix_now:.1f} atr_pct={_atr_pct} "
+                    f"adx={_adx_val:.0f} tod={_tod} market={_trend}"
+                )
+            except Exception:
+                pass
+
+            return {"sym": sym, "sig": sig, "root": root, "cur_px": cur_px, "regime_tags": _rtags}
         except Exception as e:
             _aplog.warning(f"{sym} check error: {e}")
-            return {"sym": sym, "sig": None, "root": sym, "cur_px": None}
+            return {"sym": sym, "sig": None, "root": sym, "cur_px": None, "regime_tags": ""}
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(_check, s): s for s in _AP_SYMBOLS}
         for f in as_completed(futures):
             r = f.result()
             sym, sig, root, cur_px = r["sym"], r["sig"], r["root"], r["cur_px"]
+            _rtags = r.get("regime_tags", "")
 
             if not sig:
                 _aplog.info(f"SKIP {sym}: no setup (A+ long or Fade short — score below threshold or outside window)")
@@ -500,6 +591,41 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                     _aplog.info(f"SKIP {sym}: correlation block — {open_index} index position already open")
                     continue
 
+            # ── Profit-protection guard ──────────────────────────────── #
+            # If we're up 3R+ on the day (account-wide), protect the gains.
+            # Per-symbol 2R guard: if that symbol made 2R+ today, skip it.
+            _base_1r = broker.account_balance * (settings.max_risk_per_trade_pct / 100)
+            _daily_pnl = broker.risk_manager.daily_pnl
+            if _daily_pnl >= 3.0 * _base_1r:
+                _aplog.info(
+                    f"SKIP {sym}: daily PnL +${_daily_pnl:.0f} ≥ 3R — protecting profits, done for today"
+                )
+                continue
+            # Per-symbol: query today's realised PnL for this root
+            try:
+                import duckdb as _ddb
+                _today_iso = datetime.now(_AP_ET).strftime("%Y-%m-%d")
+                _sym_pnl_row = _ddb.connect(DB_PATH).execute(
+                    "SELECT COALESCE(SUM(pnl),0) FROM trade_journal "
+                    "WHERE symbol=? AND closed_at::DATE=? AND ai_reasoning!='partial_exit_t1'",
+                    [root, _today_iso],
+                ).fetchone()
+                _sym_pnl = float(_sym_pnl_row[0]) if _sym_pnl_row else 0.0
+                if _sym_pnl >= 2.0 * _base_1r:
+                    _aplog.info(
+                        f"SKIP {sym}: symbol PnL +${_sym_pnl:.0f} ≥ 2R — done on {root} today"
+                    )
+                    continue
+            except Exception:
+                pass   # DB not ready — skip guard, don't block trade
+
+            # ── Dynamic sizing: score-tier risk multiplier ─────────────── #
+            _risk_mult = _score_to_risk_mult(sig)
+            _aplog.info(
+                f"SIZE {sym}: strategy={sig.get('strategy')} score={sig['score']:.2f} "
+                f"→ risk_mult={_risk_mult:.2f}×"
+            )
+
             # Execute paper trade
             ok, msg, pos = broker.open_position(
                 symbol=root,
@@ -512,7 +638,9 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                 ai_reasoning=(
                     f"Server autopilot | score={sig['score']} | "
                     f"regime={sig.get('regime','')} | bar={sig.get('bar_time','')}"
+                    + (f" | {_rtags}" if _rtags else "")
                 ),
+                risk_multiplier=_risk_mult,
             )
             if ok:
                 with _AP_LOCK:
@@ -904,6 +1032,155 @@ def _make_broker():
 _broker: "PaperBroker | None" = None
 _agent:  "TradingAgent | None" = None
 _last_agg: dict = {}
+
+# ─────────────────────────────────────────────────────────────────────
+# SHADOW POSITION TRACKING
+# Tracks ORB (and any future shadow-mode strategy) signals to completion
+# using TradeSimulator so we can evaluate promotion readiness.
+# ─────────────────────────────────────────────────────────────────────
+_SHADOW_SIMS: dict[str, tuple[TradeSimulator, dict]] = {}
+# key   = shadow position id (uuid)
+# value = (TradeSimulator instance, metadata dict with symbol/strategy)
+
+_SHADOW_LOCK = threading.Lock()
+
+
+def _open_shadow_position(strategy: str, symbol: str, sig: dict, atr: float) -> None:
+    """
+    Create a TradeSimulator for a shadow signal and persist it to shadow_signals.
+
+    sig keys: direction, entry, stop, target_1, target (=T2), score, strategy, regime.
+    """
+    import uuid as _uuid
+    try:
+        sid = str(_uuid.uuid4())
+        direction = sig["direction"]
+        d_int = 1 if direction == "BUY" else -1
+        entry = float(sig["entry"])
+        stop  = float(sig["stop"])
+        t1    = float(sig.get("target_1") or sig.get("t1") or (entry + d_int * abs(entry - stop)))
+        t2    = float(sig.get("target") or sig.get("t2") or t1)
+
+        sim = TradeSimulator(
+            symbol=symbol,
+            direction=d_int,
+            entry=entry,
+            stop=stop,
+            t1=t1,
+            t2=t2,
+            qty=1.0,
+            apply_costs=False,
+        )
+
+        meta = {"symbol": symbol, "strategy": strategy}
+
+        with _SHADOW_LOCK:
+            _SHADOW_SIMS[sid] = (sim, meta)
+
+        now_ts = datetime.now(timezone.utc).isoformat()
+        conn = duckdb.connect(DB_PATH)
+        conn.execute(
+            """
+            INSERT INTO shadow_signals
+                (id, strategy, symbol, direction, entry, original_stop, current_stop,
+                 t1, t2, score, signal_time, status, t1_exited, bars_managed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', FALSE, 0)
+            """,
+            [sid, strategy, symbol, direction, entry, stop, stop, t1, t2,
+             float(sig.get("score", 0.0)), now_ts],
+        )
+        conn.close()
+        _aplog.info(
+            f"[SHADOW OPEN] id={sid} {strategy} {symbol} {direction} "
+            f"entry={entry:.2f} stop={stop:.2f} t1={t1:.2f} t2={t2:.2f} "
+            f"score={sig.get('score', 0.0):.2f}"
+        )
+    except Exception as e:
+        _aplog.warning(f"_open_shadow_position failed: {e}")
+
+
+def _tick_shadow_positions(symbol: str, current_price: float, atr: float, eod: bool) -> None:
+    """
+    Advance all open shadow sims for this symbol by one price tick.
+    Handles partial (T1) and close events, updating shadow_signals accordingly.
+    Thread-safe via _SHADOW_LOCK.
+    """
+    try:
+        with _SHADOW_LOCK:
+            matching_ids = [
+                sid for sid, (_, meta) in _SHADOW_SIMS.items()
+                if meta["symbol"] == symbol
+            ]
+
+        for sid in matching_ids:
+            try:
+                with _SHADOW_LOCK:
+                    if sid not in _SHADOW_SIMS:
+                        continue
+                    sim, meta = _SHADOW_SIMS[sid]
+
+                tick = sim.tick(
+                    hi=current_price,
+                    lo=current_price,
+                    cl=current_price,
+                    atr=atr,
+                    eod=eod,
+                    timeout=False,
+                )
+
+                conn = duckdb.connect(DB_PATH)
+                if tick is None:
+                    conn.execute(
+                        "UPDATE shadow_signals SET bars_managed = bars_managed + 1 WHERE id = ?",
+                        [sid],
+                    )
+                elif tick.kind == "partial":
+                    conn.execute(
+                        """
+                        UPDATE shadow_signals
+                        SET t1_exited    = TRUE,
+                            current_stop = entry,
+                            bars_managed = bars_managed + 1
+                        WHERE id = ?
+                        """,
+                        [sid],
+                    )
+                    _aplog.info(
+                        f"[SHADOW T1] id={sid} {meta['symbol']} partial exit "
+                        f"@ {tick.exit_price:.2f} (stop → BE)"
+                    )
+                elif tick.kind == "close":
+                    risk_pts = abs(sim.entry - sim._sl_orig)
+                    pnl_pts  = (tick.exit_price - sim.entry) * sim.direction
+                    r_mult   = tick.r_multiple
+                    closed_ts = datetime.now(timezone.utc).isoformat()
+                    conn.execute(
+                        """
+                        UPDATE shadow_signals
+                        SET status      = 'closed',
+                            exit_price  = ?,
+                            exit_reason = ?,
+                            pnl_pts     = ?,
+                            r_multiple  = ?,
+                            closed_at   = ?,
+                            bars_managed = bars_managed + 1
+                        WHERE id = ?
+                        """,
+                        [tick.exit_price, tick.reason, round(pnl_pts, 4),
+                         round(r_mult, 3), closed_ts, sid],
+                    )
+                    with _SHADOW_LOCK:
+                        _SHADOW_SIMS.pop(sid, None)
+                    _aplog.info(
+                        f"[SHADOW CLOSE] id={sid} {meta['symbol']} {tick.reason} "
+                        f"@ {tick.exit_price:.2f} pnl={pnl_pts:.2f}pts R={r_mult:.3f}"
+                    )
+                conn.close()
+            except Exception as e:
+                _aplog.warning(f"_tick_shadow_positions inner error sid={sid}: {e}")
+    except Exception as e:
+        _aplog.warning(f"_tick_shadow_positions outer error symbol={symbol}: {e}")
+
 
 # ─────────────────────────────────────────────────────────────────────
 # HEALTH / INFO
@@ -2012,3 +2289,58 @@ def get_journal(limit: int = 200):
         }
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ─────────────────────────────────────────────────────────────────────
+# SHADOW PERFORMANCE  — per-strategy stats for promotion decisions
+# ─────────────────────────────────────────────────────────────────────
+@app.get("/api/shadow-performance")
+def shadow_performance():
+    """
+    Return shadow trade stats per strategy.
+
+    Promotion criteria: total >= 25 AND profit_factor >= 1.8 AND avg_r >= 0.25.
+    """
+    try:
+        conn = duckdb.connect(DB_PATH)
+        rows = conn.execute(
+            """
+            SELECT strategy, pnl_pts, r_multiple
+            FROM shadow_signals
+            WHERE status = 'closed'
+            """
+        ).fetchall()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(500, f"shadow_performance DB error: {e}")
+
+    # Aggregate per strategy
+    from collections import defaultdict
+    buckets: dict[str, list] = defaultdict(list)
+    for strategy, pnl_pts, r_mult in rows:
+        buckets[strategy].append((pnl_pts or 0.0, r_mult or 0.0))
+
+    out: dict = {}
+    for strategy, trades in buckets.items():
+        total  = len(trades)
+        wins   = sum(1 for p, _ in trades if p > 0)
+        losses = total - wins
+        gross_win  = sum(p for p, _ in trades if p > 0)
+        gross_loss = abs(sum(p for p, _ in trades if p <= 0))
+        avg_r  = round(sum(r for _, r in trades) / total, 3) if total else 0.0
+        pf     = round(gross_win / gross_loss, 3) if gross_loss > 0 else 9.999
+        wr     = round(wins / total, 3) if total else 0.0
+
+        promote_ready = (total >= 25 and pf >= 1.8 and avg_r >= 0.25)
+        out[strategy] = {
+            "total":            total,
+            "wins":             wins,
+            "losses":           losses,
+            "win_rate":         wr,
+            "avg_r":            avg_r,
+            "profit_factor":    pf,
+            "promote_ready":    promote_ready,
+            "promote_criteria": "need 25+ trades, PF > 1.8, avg_r > 0.25",
+        }
+
+    return out

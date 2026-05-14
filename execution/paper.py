@@ -165,6 +165,7 @@ class PaperBroker:
         target_1: float = 0.0,
         strategy_used: str = "",
         ai_reasoning: str = "",
+        risk_multiplier: float = 1.0,
     ) -> tuple[bool, str, Position | None]:
         """
         Attempt to open a position.
@@ -178,6 +179,7 @@ class PaperBroker:
             stop_loss=stop_loss,
             take_profit=take_profit,
             account_balance=self.account_balance,
+            risk_multiplier=risk_multiplier,
         )
 
         validation: RiskValidation = self.risk_manager.validate(req)

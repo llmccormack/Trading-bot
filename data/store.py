@@ -97,6 +97,29 @@ def init_db() -> None:
                     PRIMARY KEY (id)
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS shadow_signals (
+                    id              VARCHAR PRIMARY KEY,
+                    strategy        VARCHAR NOT NULL,
+                    symbol          VARCHAR NOT NULL,
+                    direction       VARCHAR NOT NULL,
+                    entry           DOUBLE NOT NULL,
+                    original_stop   DOUBLE NOT NULL,
+                    current_stop    DOUBLE NOT NULL,
+                    t1              DOUBLE NOT NULL,
+                    t2              DOUBLE NOT NULL,
+                    score           DOUBLE NOT NULL,
+                    signal_time     TIMESTAMP NOT NULL,
+                    status          VARCHAR DEFAULT 'open',
+                    t1_exited       BOOLEAN DEFAULT FALSE,
+                    exit_price      DOUBLE,
+                    exit_reason     VARCHAR,
+                    pnl_pts         DOUBLE,
+                    r_multiple      DOUBLE,
+                    closed_at       TIMESTAMP,
+                    bars_managed    INT DEFAULT 0
+                )
+            """)
             conn.close()
         except Exception:
             # Tables already exist from a parallel Streamlit thread — that's fine
