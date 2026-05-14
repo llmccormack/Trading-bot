@@ -2326,8 +2326,20 @@ def get_journal(limit: int = 200):
                 "daily_loss_met":    worst_day_val >= -2000.0,
             }
 
+        # NaN → None: DuckDB returns NULL numerics as float NaN in pandas.
+        # NaN is not JSON-serialisable; None serialises as null.
+        # This affects the new regime columns (tod/market/atr_pct/adx/vix)
+        # for older journal rows that pre-date the schema migration.
+        import math as _math
+        _trades_df   = jdf.drop(columns=["_date", "ai_reasoning"])
+        _trades_list = [
+            {k: (None if isinstance(v, float) and (_math.isnan(v) or _math.isinf(v)) else v)
+             for k, v in row.items()}
+            for row in _trades_df.to_dict("records")
+        ]
+
         return {
-            "trades": jdf.drop(columns=["_date", "ai_reasoning"]).to_dict("records"),
+            "trades": _trades_list,
             "equity_curve": [round(v, 2) for v in cum_pnl.values],
             "daily_pnl": daily_pnl,
             "strategy_stats": strategy_stats,
