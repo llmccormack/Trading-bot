@@ -99,11 +99,7 @@ def _get_vix_today() -> tuple[float, bool]:
             f"VIX BLOCK: VIX={vix:.1f} >= {VIX_BLOCK_THRESHOLD} — "
             f"no new entries today (extreme volatility)"
         )
-        _phone(
-            title=f"VIX Block — No Trades Today",
-            body=f"VIX={vix:.1f} (threshold {VIX_BLOCK_THRESHOLD}). Too volatile — skipping entries.",
-            tags="warning",
-        )
+        # Log only — no push. Trade notifications cover what matters.
     else:
         _aplog.info(f"VIX check OK: {vix:.1f} (threshold {VIX_BLOCK_THRESHOLD})")
     return vix, blocked
@@ -736,8 +732,7 @@ def _send_weekly_summary(broker: "PaperBroker") -> None:
 
         n = len(rows)
         if n == 0:
-            _phone(title="Weekly Wrap — No Trades", body="No trades closed this week.", tags="calendar")
-            _aplog.info("Weekly summary sent: no trades")
+            _aplog.info("Weekly wrap: no trades this week — skipping push")
             return
 
         total_pnl  = sum(r[0] or 0 for r in rows)
@@ -761,8 +756,8 @@ def _send_weekly_summary(broker: "PaperBroker") -> None:
                 f"\nCombine P&L: ${combine_profit:+,.0f} / ${settings.topstep_profit_target:,.0f} target"
             )
 
-        _phone(title=title, body=body[:500], tags="calendar,bar_chart", priority="default")
-        _aplog.info(f"Weekly summary sent: {title}")
+        # Weekly wrap — log only. Daily report covers day-to-day results.
+        _aplog.info(f"Weekly wrap: {title} | {body[:200]}")
     except Exception as e:
         _aplog.warning(f"Weekly summary failed: {e}")
 
@@ -2179,18 +2174,6 @@ def topstep_toggle(body: dict = Body(...)):
     pairs["TOPSTEP_MODE"] = "true" if enabled else "false"
     _write_env(pairs)
     _aplog.info(f"TopStep mode {'ENABLED' if enabled else 'DISABLED'} via API")
-    if enabled:
-        _phone(
-            title = "TopStep Combine Mode ENABLED",
-            body  = (
-                f"Tighter risk active:\n"
-                f"  Score threshold: 0.75 (unchanged — edge comes from dollar limits, not score filter)\n"
-                f"  Daily loss limit: ${settings.topstep_daily_loss_limit:.0f}\n"
-                f"  VIX block: 20 (was {VIX_BLOCK_THRESHOLD})\n"
-                f"  Shorts (Fade) disabled"
-            ),
-            tags = "trophy",
-        )
     return {"ok": True, "enabled": enabled}
 
 # ─────────────────────────────────────────────────────────────────────
