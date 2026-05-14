@@ -93,6 +93,10 @@ class RiskManager:
         #    scaled by per-signal risk_multiplier from score-tier logic)
         max_dollar_risk = req.account_balance * (self.max_risk_pct / 100) * max(0.0, req.risk_multiplier)
         position_size = max_dollar_risk / risk_per_unit
+        # NOTE: max(1, ...) means a 0.5× multiplier still executes 1 contract
+        # when the account is too small to reach 2 contracts on the base risk.
+        # True fractional sizing requires micro contracts (e.g. MES instead of ES).
+        # For paper trading this floor is acceptable; revisit before live sizing.
         position_size = max(1, round(position_size))  # minimum 1 unit
 
         dollar_risk = position_size * risk_per_unit

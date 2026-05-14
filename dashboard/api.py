@@ -205,12 +205,18 @@ def _ap_is_market_hours() -> bool:
 
 
 def _get_today_pnl() -> float:
-    """Return today's total realized P&L from the journal (negative = loss)."""
+    """Return today's total realized P&L from the journal (negative = loss).
+
+    Excludes partial_exit_t1 rows — the final close row stores total_pnl
+    (partial + runner) so including partials would double-count T1 exits.
+    """
     try:
         today = datetime.now(_AP_ET).strftime("%Y-%m-%d")
         conn  = duckdb.connect(DB_PATH)
         row   = conn.execute(
-            "SELECT COALESCE(SUM(pnl),0) FROM trade_journal WHERE closed_at::DATE = ?", [today]
+            "SELECT COALESCE(SUM(pnl),0) FROM trade_journal "
+            "WHERE closed_at::DATE = ? AND ai_reasoning != 'partial_exit_t1'",
+            [today],
         ).fetchone()
         conn.close()
         return float(row[0]) if row else 0.0
@@ -337,6 +343,14 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             df     = fetch_historical(sym, "5m", days_back=58)
             snap   = get_live_price(root)
             cur_px = snap.get("last_price") if snap else None
+
+            # Ensure ATR is present — fetch_historical returns raw OHLCV.
+            # add_atr() here guarantees shadow ticking always has a valid ATR.
+            # The engine's live_signal() will also call add_all() internally —
+            # that's fine, the extra pass is idempotent and cheap.
+            if not df.empty and "atr" not in df.columns:
+                from utils.indicators import add_atr as _add_atr
+                df = _add_atr(df)
 
             _now_et             = datetime.now(ZoneInfo("America/New_York"))
             _is_monday          = _now_et.weekday() == 0
@@ -673,8 +687,10 @@ def _send_weekly_summary(broker: "PaperBroker") -> None:
                       - timedelta(days=days_since_mon)).strftime("%Y-%m-%d")
         conn = duckdb.connect(DB_PATH)
         rows = conn.execute(
-            "SELECT pnl, r_multiple, symbol FROM trade_journal WHERE closed_at::DATE >= ? ORDER BY closed_at",
-            [week_start]
+            "SELECT pnl, r_multiple, symbol FROM trade_journal "
+            "WHERE closed_at::DATE >= ? AND ai_reasoning != 'partial_exit_t1' "
+            "ORDER BY closed_at",
+            [week_start],
         ).fetchall()
         conn.close()
 
@@ -728,11 +744,14 @@ def _send_daily_summary(broker: "PaperBroker") -> None:
         rows  = conn.execute("""
             SELECT pnl, direction, symbol, r_multiple FROM trade_journal
             WHERE closed_at::DATE = ?
+              AND ai_reasoning != 'partial_exit_t1'
             ORDER BY closed_at
         """, [today]).fetchall()
-        # All-time stats for streak
+        # All-time stats for streak — exclude partial rows so each trade counts once
         all_rows = conn.execute("""
-            SELECT pnl FROM trade_journal ORDER BY closed_at DESC LIMIT 20
+            SELECT pnl FROM trade_journal
+            WHERE ai_reasoning != 'partial_exit_t1'
+            ORDER BY closed_at DESC LIMIT 20
         """).fetchall()
         conn.close()
 
@@ -822,7 +841,9 @@ def _ap_background_loop(broker_ref_fn) -> None:
                                      - timedelta(days=_days_since_mon)).strftime("%Y-%m-%d")
                         _conn = duckdb.connect(DB_PATH)
                         _wk_rows = _conn.execute(
-                            "SELECT pnl FROM trade_journal WHERE closed_at::DATE >= ?", [_wk_start]
+                            "SELECT pnl FROM trade_journal "
+                            "WHERE closed_at::DATE >= ? AND ai_reasoning != 'partial_exit_t1'",
+                            [_wk_start],
                         ).fetchall()
                         _conn.close()
                         if _wk_rows:
@@ -1150,9 +1171,11 @@ def _tick_shadow_positions(symbol: str, current_price: float, atr: float, eod: b
                         f"@ {tick.exit_price:.2f} (stop → BE)"
                     )
                 elif tick.kind == "close":
-                    risk_pts = abs(sim.entry - sim._sl_orig)
-                    pnl_pts  = (tick.exit_price - sim.entry) * sim.direction
-                    r_mult   = tick.r_multiple
+                    # Use tick.total_pnl — it includes the T1 partial exit PnL
+                    # so pnl_pts and r_multiple are consistent with each other.
+                    # (Computing from exit_price alone ignores the partial.)
+                    pnl_pts = tick.total_pnl
+                    r_mult  = tick.r_multiple
                     closed_ts = datetime.now(timezone.utc).isoformat()
                     conn.execute(
                         """

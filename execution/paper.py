@@ -89,19 +89,23 @@ class PaperBroker:
         try:
             conn = duckdb.connect(self.db_path)
 
-            # Restore account balance from trade_journal — this table captures ALL exits
-            # including partial T1 scale-outs that positions.realized_pnl misses.
-            # Using trade_journal gives an accurate running account balance on restart.
+            # Restore account balance from trade_journal.
+            # IMPORTANT: exclude partial_exit_t1 rows — the final runner-close row
+            # now stores total_pnl (partial + runner) so summing all rows would
+            # double-count the T1 partial on every trade that hit T1.
             pnl_row = conn.execute(
-                "SELECT COALESCE(SUM(pnl), 0.0) FROM trade_journal"
+                "SELECT COALESCE(SUM(pnl), 0.0) FROM trade_journal "
+                "WHERE ai_reasoning != 'partial_exit_t1'"
             ).fetchone()
             if pnl_row is not None:
                 self.account_balance = settings.paper_account_size + float(pnl_row[0])
 
-            # Restore today's daily P&L so the risk manager's daily-loss guard is accurate
+            # Restore today's daily P&L so the risk manager's daily-loss guard is accurate.
+            # Same exclusion — final close row already includes the T1 partial PnL.
             today_pnl_row = conn.execute("""
                 SELECT COALESCE(SUM(pnl), 0.0) FROM trade_journal
                 WHERE closed_at::DATE = current_date
+                  AND ai_reasoning != 'partial_exit_t1'
             """).fetchone()
             if today_pnl_row:
                 self.risk_manager._daily_realized_pnl = float(today_pnl_row[0])
