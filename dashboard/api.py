@@ -867,48 +867,19 @@ def _ap_background_loop(broker_ref_fn) -> None:
                     _save_ap_state()
                     _aplog.info("Daily risk reset complete — daily P&L counter and halt flag cleared")
 
-            # ── Morning health ping at 9:25 AM ET ─────────────────────── #
+            # ── Morning session open — log only, no push notification ─── #
+            # Startup sends the one-and-only "server is alive" push.
+            # A 9:25 AM ping on top of that creates duplicate alerts every
+            # time the server restarts during market hours.
             if (now_et.weekday() < 5 and now_et.hour == 9 and now_et.minute >= 25):
                 if today_str not in _AP_HEALTH_SENT:
                     _AP_HEALTH_SENT.add(today_str)
                     _save_ap_state()
                     open_pos = broker.open_positions
-                    # Pull this week's stats for context
-                    _week_summary = ""
-                    try:
-                        _days_since_mon = now_et.weekday()
-                        _wk_start = (now_et.replace(hour=0, minute=0, second=0, microsecond=0)
-                                     - timedelta(days=_days_since_mon)).strftime("%Y-%m-%d")
-                        _conn = duckdb.connect(DB_PATH)
-                        _wk_rows = _conn.execute(
-                            "SELECT pnl FROM trade_journal "
-                            "WHERE closed_at::DATE >= ? AND ai_reasoning != 'partial_exit_t1'",
-                            [_wk_start],
-                        ).fetchall()
-                        _conn.close()
-                        if _wk_rows:
-                            _wk_n    = len(_wk_rows)
-                            _wk_pnl  = sum(r[0] or 0 for r in _wk_rows)
-                            _wk_wins = sum(1 for r in _wk_rows if (r[0] or 0) > 0)
-                            _week_summary = (
-                                f"\nThis week: {_wk_n} trades | "
-                                f"{_wk_wins}W {_wk_n-_wk_wins}L | "
-                                f"${_wk_pnl:+.0f}"
-                            )
-                    except Exception:
-                        pass
-                    _phone(
-                        title    = "Rival Automations — Server Alive",
-                        body     = (
-                            f"Watching NQ, ES | Armed: {_AP_ARMED}\n"
-                            f"Open positions: {len(open_pos)} | "
-                            f"Balance: ${broker.account_balance:,.0f}"
-                            + _week_summary
-                        ),
-                        tags     = "eyes",
-                        priority = "default",
+                    _aplog.info(
+                        f"Session open | Armed: {_AP_ARMED} | "
+                        f"Open: {len(open_pos)} | Balance: ${broker.account_balance:,.0f}"
                     )
-                    _aplog.info("Morning health ping sent")
 
             # ── EOD force-close at 15:55 ET ───────────────────────────── #
             if (now_et.weekday() < 5 and now_et.hour == 15 and now_et.minute >= 55):
@@ -979,6 +950,25 @@ async def _lifespan(app: FastAPI):
     )
     t.start()
     _aplog.info("Server autopilot thread launched")
+
+    # ── Single startup notification — one ping per deploy/restart ──────
+    # All other "server alive" health pings have been removed so this is
+    # the only unsolicited push you'll receive about the app itself.
+    try:
+        open_pos = _broker.open_positions if _broker else []
+        _phone(
+            title    = "Rival Automations — Online",
+            body     = (
+                f"Balance: ${_broker.account_balance:,.0f} | "
+                f"Armed: {_AP_ARMED} | "
+                f"Open positions: {len(open_pos)}"
+            ),
+            tags     = "rocket",
+            priority = "default",
+        )
+    except Exception:
+        pass
+
     yield
     # Clean up PID file on graceful shutdown
     try:
@@ -2202,6 +2192,66 @@ def topstep_toggle(body: dict = Body(...)):
             tags = "trophy",
         )
     return {"ok": True, "enabled": enabled}
+
+# ─────────────────────────────────────────────────────────────────────
+# PAPER ACCOUNT RESET
+# ─────────────────────────────────────────────────────────────────────
+@app.post("/api/admin/reset-paper")
+def reset_paper_account():
+    """
+    Wipe all journal and position history and reset the paper account to
+    the configured starting balance ($100K by default).
+
+    This is a hard reset — all trade history is permanently deleted.
+    Use only when you want a clean slate (e.g. after fixing accounting bugs).
+    """
+    if _broker is None:
+        raise HTTPException(503, "Broker not initialised")
+
+    try:
+        # 1. Clear all in-memory positions (no DB update — we're deleting the table)
+        with _broker._close_lock:
+            _broker._positions.clear()
+
+        # 2. Wipe DB — positions first (trade_journal may reference them)
+        conn = duckdb.connect(DB_PATH)
+        conn.execute("DELETE FROM trade_journal")
+        conn.execute("DELETE FROM positions")
+        conn.close()
+
+        # 3. Reset broker financial state
+        _broker.account_balance = settings.paper_account_size
+        _broker.risk_manager._daily_realized_pnl = 0.0
+        _broker.risk_manager._open_positions     = 0
+        _broker.risk_manager._halted             = False
+
+        # 4. Clear autopilot operational state
+        with _AP_LOCK:
+            _AP_TRADED_TODAY.clear()
+        today_str = datetime.now(_AP_ET).strftime("%Y-%m-%d")
+        _AP_SUMMARY_SENT.discard(today_str)
+        _AP_HEALTH_SENT.discard(today_str)
+        _AP_EOD_SENT.discard(today_str)
+        _AP_RESET_SENT.discard(today_str)
+        _save_ap_state()
+
+        _aplog.info(
+            f"Paper account reset — journal cleared, "
+            f"balance reset to ${settings.paper_account_size:,.0f}"
+        )
+        _phone(
+            title = "Paper Account Reset ✓",
+            body  = f"Fresh start at ${settings.paper_account_size:,.0f}. All history cleared.",
+            tags  = "white_check_mark",
+        )
+        return {
+            "ok":              True,
+            "account_balance": settings.paper_account_size,
+            "message":         "Paper account reset. All journal and position data deleted.",
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Reset failed: {e}")
+
 
 @app.get("/api/journal")
 def get_journal(limit: int = 200):
