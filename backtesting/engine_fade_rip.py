@@ -26,6 +26,7 @@ import pytz
 
 from utils.indicators import add_all
 from backtesting.models import BacktestTrade, BacktestResult
+from backtesting.trade_sim import TradeSimulator
 
 ET = pytz.timezone("America/New_York")
 
@@ -72,9 +73,9 @@ class FadeTheRipEngine:
 
         trades: list[BacktestTrade] = []
         open_trade: dict | None = None
+        _sim: TradeSimulator | None = None
         trades_today = 0
         last_trade_day = None
-        t1_hit = False
 
         for i in range(50, len(df)):
             row = df.iloc[i]
@@ -88,13 +89,38 @@ class FadeTheRipEngine:
 
             # ── Manage open trade ──────────────────────────────── #
             if open_trade is not None:
-                result = self._manage_trade(df, i, open_trade, t1_hit)
-                if result == "t1_hit":
-                    t1_hit = True
-                elif result is not None:
-                    trades.append(result)
-                    open_trade = None
-                    t1_hit = False
+                hi      = float(row["high"])
+                lo      = float(row["low"])
+                cl      = float(row["close"])
+                atr_now = float(row["atr"])
+                eod     = int(row["hour_et"]) == 15 and int(row["min_et"]) >= 55
+                timeout = (i - open_trade["entry_bar"]) >= MAX_BARS_HELD
+
+                tick = _sim.tick(hi, lo, cl, atr_now, eod=eod, timeout=timeout)
+                if tick is None:
+                    continue
+                if tick.kind == "partial":
+                    continue   # T1 booked inside sim; runner still alive
+
+                trades.append(BacktestTrade(
+                    strategy        = "fade_the_rip",
+                    direction       = "SELL",
+                    entry_bar       = open_trade["entry_bar"],
+                    exit_bar        = i,
+                    entry_price     = open_trade["entry"],
+                    exit_price      = round(tick.exit_price, 4),
+                    stop_loss       = open_trade["sl_orig"],
+                    take_profit     = open_trade["t2"],
+                    exit_reason     = tick.reason,
+                    pnl_pts         = round(tick.total_pnl, 4),
+                    r_multiple      = round(tick.r_multiple, 3),
+                    bars_held       = i - open_trade["entry_bar"],
+                    composite_score = 0.0,
+                    regime          = "fade_rip",
+                    be_moved        = _sim.t1_exited,
+                ))
+                open_trade = None
+                _sim = None
                 continue
 
             # ── Entry window check ─────────────────────────────── #
@@ -117,13 +143,20 @@ class FadeTheRipEngine:
             entry, stop, t1, t2 = sig
             open_trade = {
                 "entry_bar": i,
-                "entry_price": entry,
-                "stop": stop,
-                "t1": t1,
-                "t2": t2,
-                "risk_pts": stop - entry,
+                "entry":     entry,
+                "sl_orig":   stop,   # original stop level (for BacktestTrade record)
+                "t2":        t2,
             }
-            t1_hit = False
+            _sim = TradeSimulator(
+                symbol      = symbol,
+                direction   = -1,    # short-only engine
+                entry       = entry,
+                stop        = stop,
+                t1          = t1,
+                t2          = t2,
+                qty         = 1.0,
+                apply_costs = False,
+            )
             trades_today += 1
 
         result = BacktestResult(
@@ -248,102 +281,6 @@ class FadeTheRipEngine:
             return True
 
         return False
-
-    # ─────────────────────────────────────────────────────────────── #
-    # Trade Management                                                 #
-    # ─────────────────────────────────────────────────────────────── #
-
-    def _manage_trade(
-        self, df: pd.DataFrame, i: int, trade: dict, t1_hit: bool
-    ) -> str | BacktestTrade | None:
-        """
-        Returns:
-          "t1_hit"       — first target hit, move stop to BE
-          BacktestTrade  — trade closed
-          None           — still open
-        """
-        row   = df.iloc[i]
-        hi    = float(row["high"])
-        lo    = float(row["low"])
-        cl    = float(row["close"])
-        h, m  = int(row["hour_et"]), int(row["min_et"])
-
-        entry  = trade["entry_price"]
-        stop   = trade["stop"]
-        t1     = trade["t1"]
-        t2     = trade["t2"]
-        risk   = trade["risk_pts"]
-        e_bar  = trade["entry_bar"]
-
-        # After T1, stop moves to breakeven
-        effective_stop = entry if t1_hit else stop
-
-        # EOD force close
-        eod = h == 15 and m >= 55
-        bars_held = i - e_bar
-        timeout   = bars_held >= MAX_BARS_HELD
-
-        # Short: profit is downward movement
-        # Stop hit (price went up through stop)
-        if hi >= effective_stop:
-            exit_px    = effective_stop
-            runner_pnl = entry - exit_px          # 0 when stopped at BE
-            if t1_hit:
-                pnl = trade.get("partial_pnl", 0.0) + runner_pnl * 0.5
-            else:
-                pnl = runner_pnl
-            r      = pnl / risk if risk > 0 else 0.0
-            reason = "be_stopped" if t1_hit else "stop"
-            return self._make_trade(trade, i, exit_px, reason, pnl, r, bars_held, t1_hit)
-
-        # T1 hit — book half position profit, store partial_pnl, signal caller to move stop
-        if not t1_hit and lo <= t1:
-            trade["partial_pnl"] = (entry - t1) * 0.5   # short: entry > t1, so positive
-            return "t1_hit"
-
-        # T2 hit (runner — half position)
-        if t1_hit and lo <= t2:
-            exit_px    = t2
-            runner_pnl = entry - exit_px
-            pnl        = trade.get("partial_pnl", 0.0) + runner_pnl * 0.5
-            r          = pnl / risk if risk > 0 else 0.0
-            return self._make_trade(trade, i, exit_px, "target2", pnl, r, bars_held, t1_hit)
-
-        # EOD or timeout
-        if eod or timeout:
-            exit_px    = cl
-            runner_pnl = entry - exit_px
-            if t1_hit:
-                pnl = trade.get("partial_pnl", 0.0) + runner_pnl * 0.5
-            else:
-                pnl = runner_pnl
-            r      = pnl / risk if risk > 0 else 0.0
-            reason = "eod" if eod else "timeout"
-            return self._make_trade(trade, i, exit_px, reason, pnl, r, bars_held, t1_hit)
-
-        return None
-
-    def _make_trade(
-        self, trade: dict, exit_bar: int, exit_px: float,
-        reason: str, pnl: float, r: float, bars_held: int, t1_hit: bool
-    ) -> BacktestTrade:
-        return BacktestTrade(
-            strategy="fade_the_rip",
-            direction="SELL",
-            entry_bar=trade["entry_bar"],
-            exit_bar=exit_bar,
-            entry_price=trade["entry_price"],
-            exit_price=exit_px,
-            stop_loss=trade["stop"],
-            take_profit=trade["t2"],
-            exit_reason=reason,
-            pnl_pts=round(pnl, 4),
-            r_multiple=round(r, 3),
-            bars_held=bars_held,
-            composite_score=0.0,
-            regime="fade_rip",
-            be_moved=t1_hit,
-        )
 
     # ─────────────────────────────────────────────────────────────── #
     # Live Signal (mirrors A+ interface for autopilot integration)    #

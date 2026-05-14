@@ -116,6 +116,10 @@ class TradeSimulator:
         self._risk    = abs(self.entry - self.stop)
         # R = half the T1 distance.  For a 2R T1 target this equals original risk.
         self._R = abs(self.t1 - self.entry) / 2.0
+        # Normalise "ES=F" → "ES" for table lookups
+        _root = self.symbol.split("=")[0]
+        self._slip_pts = SLIPPAGE_PTS.get(_root, SLIPPAGE_PTS.get(self.symbol, _DEFAULT_SLIP))
+        self._comm_rt  = COMMISSION_RT.get(_root, COMMISSION_RT.get(self.symbol, _DEFAULT_COMM))
 
     # ─────────────────────────────────────────────────────────────────── #
     # Public API                                                           #
@@ -221,10 +225,10 @@ class TradeSimulator:
     # ─────────────────────────────────────────────────────────────────── #
 
     def _slip(self) -> float:
-        return SLIPPAGE_PTS.get(self.symbol, _DEFAULT_SLIP) if self.apply_costs else 0.0
+        return self._slip_pts if self.apply_costs else 0.0
 
     def _comm(self, qty: float) -> float:
-        return (COMMISSION_RT.get(self.symbol, _DEFAULT_COMM) * qty) if self.apply_costs else 0.0
+        return self._comm_rt * qty if self.apply_costs else 0.0
 
     def _apply_ratchet(self, reference_price: float) -> None:
         """Move stop 1R behind reference_price (ratchet: never steps backward)."""

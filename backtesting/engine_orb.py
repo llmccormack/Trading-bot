@@ -39,6 +39,7 @@ import ta
 
 from utils.indicators import add_all
 from backtesting.models import BacktestTrade, BacktestResult
+from backtesting.trade_sim import TradeSimulator
 
 ET = pytz.timezone("America/New_York")
 
@@ -87,8 +88,8 @@ class ORBEngine:
         result = BacktestResult(symbol=symbol, timeframe=timeframe, market="futures", total_bars=n)
 
         open_trade: dict | None = None
+        _sim: TradeSimulator | None = None
         equity   = 0.0
-        be_moved = False
         _day_trade_count: dict[str, int] = {}
 
         for i in range(50, n):
@@ -98,103 +99,40 @@ class ORBEngine:
 
             # ── Manage open trade ─────────────────────────────────── #
             if open_trade is not None:
-                lo  = float(df["low"].iloc[i])
-                hi  = float(df["high"].iloc[i])
-                cl  = float(df["close"].iloc[i])
+                lo      = float(df["low"].iloc[i])
+                hi      = float(df["high"].iloc[i])
+                cl      = float(df["close"].iloc[i])
                 atr_now = float(df["atr"].iloc[i])
-
                 eod     = (h == EOD_H and m >= EOD_M) or (h > EOD_H)
                 timeout = (i - open_trade["entry_bar"]) >= MAX_BARS
 
-                # ── Trailing stop mode (after T2 broken through) ──── #
-                if open_trade.get("t2_hit", False):
-                    trail_sl = open_trade["trail_sl"]
-                    if open_trade["dir"] == 1:
-                        new_trail = hi - 0.8 * atr_now
-                        open_trade["trail_sl"] = max(trail_sl, new_trail)
-                    else:
-                        new_trail = lo + 0.8 * atr_now
-                        open_trade["trail_sl"] = min(trail_sl, new_trail)
-                    trail_sl = open_trade["trail_sl"]
+                tick = _sim.tick(hi, lo, cl, atr_now, eod=eod, timeout=timeout)
+                if tick is None:
+                    continue
+                if tick.kind == "partial":
+                    continue   # T1 booked inside sim; runner still alive
 
-                    hit_trail = (open_trade["dir"] ==  1 and lo <= trail_sl) or \
-                                (open_trade["dir"] == -1 and hi >= trail_sl)
-
-                    if hit_trail:
-                        exit_px, reason = trail_sl, "trail_stop"
-                    elif eod:
-                        exit_px, reason = cl, "eod"
-                    elif timeout:
-                        exit_px, reason = cl, "timeout"
-                    else:
-                        continue
-
-                # ── Normal management ─────────────────────────────── #
-                else:
-                    # Partial exit at T1: book half position, move stop to BE, run the rest
-                    if not open_trade.get("t1_exited", False):
-                        _t1 = open_trade["t1"]
-                        if (open_trade["dir"] == 1 and hi >= _t1) or \
-                           (open_trade["dir"] == -1 and lo <= _t1):
-                            open_trade["sl"] = open_trade["entry"]
-                            open_trade["partial_pnl"] = (_t1 - open_trade["entry"]) * open_trade["dir"] * 0.5
-                            open_trade["t1_exited"] = True
-                            be_moved = True
-
-                    hit_t2   = (open_trade["dir"] ==  1 and hi >= open_trade["t2"]) or \
-                               (open_trade["dir"] == -1 and lo <= open_trade["t2"])
-                    hit_stop = (open_trade["dir"] ==  1 and lo <= open_trade["sl"]) or \
-                               (open_trade["dir"] == -1 and hi >= open_trade["sl"])
-
-                    # Priority: stop > T2 > eod > timeout
-                    if hit_stop:
-                        exit_px = open_trade["sl"]
-                        reason  = "be_stopped" if open_trade.get("t1_exited") else "stop"
-                    elif hit_t2:
-                        _clear_break = (open_trade["dir"] == 1 and hi >= open_trade["t2"] + 1.0 * atr_now) or \
-                                       (open_trade["dir"] == -1 and lo <= open_trade["t2"] - 1.0 * atr_now)
-                        if _clear_break:
-                            open_trade["t2_hit"] = True
-                            open_trade["trail_sl"] = open_trade["t2"] - 0.8 * atr_now \
-                                if open_trade["dir"] == 1 else open_trade["t2"] + 0.8 * atr_now
-                            continue
-                        else:
-                            exit_px, reason = open_trade["t2"], "target2"
-                    elif eod:
-                        exit_px, reason = cl, "eod"
-                    elif timeout:
-                        exit_px, reason = cl, "timeout"
-                    else:
-                        continue
-
-                _full_pnl = (exit_px - open_trade["entry"]) * open_trade["dir"]
-                if open_trade.get("t1_exited", False):
-                    pnl = open_trade["partial_pnl"] + _full_pnl * 0.5
-                else:
-                    pnl = _full_pnl
-                risk   = abs(open_trade["entry"] - open_trade["sl_orig"])
-                r_mult = pnl / risk if risk > 0 else 0.0
-                equity += pnl
-                be_moved = False
-
+                equity += tick.total_pnl
                 result.trades.append(BacktestTrade(
                     strategy    = "orb",
                     direction   = "BUY" if open_trade["dir"] == 1 else "SELL",
                     entry_bar   = open_trade["entry_bar"],
                     exit_bar    = i,
                     entry_price = open_trade["entry"],
-                    exit_price  = round(exit_px, 4),
+                    exit_price  = round(tick.exit_price, 4),
                     stop_loss   = open_trade["sl_orig"],
                     take_profit = open_trade["t2"],
-                    exit_reason = reason,
-                    pnl_pts     = round(pnl, 4),
-                    r_multiple  = round(r_mult, 2),
+                    exit_reason = tick.reason,
+                    pnl_pts     = round(tick.total_pnl, 4),
+                    r_multiple  = round(tick.r_multiple, 2),
                     bars_held   = i - open_trade["entry_bar"],
                     composite_score = open_trade["score"],
                     regime      = open_trade["regime"],
+                    be_moved    = _sim.t1_exited,
                 ))
                 result.equity_curve.append(round(equity, 4))
                 open_trade = None
+                _sim = None
                 continue
 
             # ── Filters ───────────────────────────────────────────── #
@@ -229,22 +167,25 @@ class ORBEngine:
                 continue
 
             open_trade = {
-                "entry_bar":   i,
-                "dir":         1 if direction == "BUY" else -1,
-                "entry":       entry,
-                "sl":          round(sl, 4),
-                "sl_orig":     round(sl, 4),
-                "t1":          round(t1, 4),
-                "t2":          round(t2, 4),
-                "score":       score,
-                "regime":      regime,
-                "t2_hit":      False,
-                "trail_sl":    None,
-                "t1_exited":   False,
-                "partial_pnl": 0.0,
+                "entry_bar": i,
+                "dir":       1 if direction == "BUY" else -1,
+                "entry":     entry,
+                "sl_orig":   round(sl, 4),
+                "t2":        round(t2, 4),
+                "score":     score,
+                "regime":    regime,
             }
+            _sim = TradeSimulator(
+                symbol      = symbol,
+                direction   = 1 if direction == "BUY" else -1,
+                entry       = entry,
+                stop        = sl,
+                t1          = t1,
+                t2          = t2,
+                qty         = 1.0,
+                apply_costs = False,
+            )
             _day_trade_count[_day_key] = _day_trade_count.get(_day_key, 0) + 1
-            be_moved = False
 
         return result
 
