@@ -52,21 +52,23 @@ def init_db() -> None:
             """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS positions (
-                    id              VARCHAR DEFAULT gen_random_uuid(),
-                    symbol          VARCHAR NOT NULL,
-                    direction       VARCHAR NOT NULL,
-                    qty             DOUBLE NOT NULL,
-                    entry_price     DOUBLE NOT NULL,
-                    stop_loss       DOUBLE,
-                    take_profit     DOUBLE,
-                    target_1        DOUBLE DEFAULT 0.0,
-                    be_moved        BOOLEAN DEFAULT FALSE,
-                    opened_at       TIMESTAMPTZ NOT NULL,
-                    closed_at       TIMESTAMPTZ,
-                    exit_price      DOUBLE,
-                    realized_pnl    DOUBLE,
-                    status          VARCHAR DEFAULT 'OPEN',
-                    notes           TEXT,
+                    id                  VARCHAR DEFAULT gen_random_uuid(),
+                    symbol              VARCHAR NOT NULL,
+                    direction           VARCHAR NOT NULL,
+                    qty                 DOUBLE NOT NULL,
+                    entry_price         DOUBLE NOT NULL,
+                    stop_loss           DOUBLE,
+                    take_profit         DOUBLE,
+                    target_1            DOUBLE DEFAULT 0.0,
+                    be_moved            BOOLEAN DEFAULT FALSE,
+                    original_stop       DOUBLE DEFAULT 0.0,
+                    partial_pnl_booked  DOUBLE DEFAULT 0.0,
+                    opened_at           TIMESTAMPTZ NOT NULL,
+                    closed_at           TIMESTAMPTZ,
+                    exit_price          DOUBLE,
+                    realized_pnl        DOUBLE,
+                    status              VARCHAR DEFAULT 'OPEN',
+                    notes               TEXT,
                     PRIMARY KEY (id)
                 )
             """)
@@ -74,6 +76,8 @@ def init_db() -> None:
             for _col_sql in [
                 "ALTER TABLE positions ADD COLUMN IF NOT EXISTS target_1 DOUBLE DEFAULT 0.0",
                 "ALTER TABLE positions ADD COLUMN IF NOT EXISTS be_moved BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE positions ADD COLUMN IF NOT EXISTS original_stop DOUBLE DEFAULT 0.0",
+                "ALTER TABLE positions ADD COLUMN IF NOT EXISTS partial_pnl_booked DOUBLE DEFAULT 0.0",
             ]:
                 try:
                     conn.execute(_col_sql)

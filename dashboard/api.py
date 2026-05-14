@@ -238,16 +238,17 @@ def _strat_state(name: str) -> str:
     return _map.get(name, "paper")
 
 
-def _score_to_risk_mult(sig: dict) -> float:
+def _score_to_risk_mult(sig: dict, regime: dict | None = None) -> float:
     """
-    Convert strategy + composite score to a position-size multiplier.
+    Convert strategy + composite score → position-size multiplier.
 
     Applied on top of max_risk_per_trade_pct so the base config stays
     unchanged — we just press harder on high-confidence setups.
 
     Tiers
     -----
-    A+   score ≥ 0.85 → 1.25× (A-grade conviction, press it)
+    A+   score ≥ 0.85 + regime green → 1.25× (conviction + structure aligned)
+    A+   score ≥ 0.85, regime not green → 1.00× (score good, conditions not ideal)
     A+   score ≥ 0.80 → 1.00× (solid, standard size)
     A+   score < 0.80 → 0.50× (borderline pass, half-size)
 
@@ -257,13 +258,28 @@ def _score_to_risk_mult(sig: dict) -> float:
     ORB  any score     → 0.50× (unproven sample — half until PF > 1.8)
 
     Others             → 0.50× (conservative default)
+
+    Regime gate (A+ 1.25× only):
+      tod     ∈ {open, primary}   — not lunch, power_hour, or eod
+      adx     ≥ 20                — trending market, not ranging chop
+      atr_pct ∈ [70, 130]         — normal volatility (not flat or spike day)
+    All three must be green; otherwise the 0.85+ setup still gets 1.00×.
     """
     strategy = sig.get("strategy", "")
     score    = float(sig.get("score", 0.75))
+    reg      = regime or {}
 
     if strategy == "aplus":
         if score >= 0.85:
-            return 1.25
+            tod     = reg.get("tod", "")
+            adx     = float(reg.get("adx", 0))
+            atr_pct = int(reg.get("atr_pct", 100))
+            regime_green = (
+                tod in ("open", "primary")
+                and adx >= 20
+                and 70 <= atr_pct <= 130
+            )
+            return 1.25 if regime_green else 1.0
         if score >= 0.80:
             return 1.0
         return 0.5                  # 0.75–0.80: marginal pass, half-size
@@ -477,7 +493,10 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                         priority = "high",
                     )
             # ── Regime tags: logged with every executed trade ──────────── #
-            _rtags = ""
+            # Also returned as a structured dict so the outer loop can use
+            # individual fields for sizing gates and entry blocks.
+            _rtags       = ""
+            _regime_dict: dict = {}
             try:
                 _atr     = float(df["atr"].iloc[-1])
                 _atr_avg = float(df["atr_avg20"].iloc[-1]) if "atr_avg20" in df.columns else _atr
@@ -497,23 +516,43 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
                     f"vix={_vix_now:.1f} atr_pct={_atr_pct} "
                     f"adx={_adx_val:.0f} tod={_tod} market={_trend}"
                 )
+                _regime_dict = {
+                    "vix": _vix_now, "atr_pct": _atr_pct,
+                    "adx": _adx_val, "tod": _tod, "market": _trend,
+                }
             except Exception:
                 pass
 
-            return {"sym": sym, "sig": sig, "root": root, "cur_px": cur_px, "regime_tags": _rtags}
+            return {
+                "sym": sym, "sig": sig, "root": root, "cur_px": cur_px,
+                "regime_tags": _rtags, "regime": _regime_dict,
+            }
         except Exception as e:
             _aplog.warning(f"{sym} check error: {e}")
-            return {"sym": sym, "sig": None, "root": sym, "cur_px": None, "regime_tags": ""}
+            return {"sym": sym, "sig": None, "root": sym, "cur_px": None,
+                    "regime_tags": "", "regime": {}}
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures = {pool.submit(_check, s): s for s in _AP_SYMBOLS}
         for f in as_completed(futures):
             r = f.result()
             sym, sig, root, cur_px = r["sym"], r["sig"], r["root"], r["cur_px"]
-            _rtags = r.get("regime_tags", "")
+            _rtags  = r.get("regime_tags", "")
+            _regime = r.get("regime", {})
 
             if not sig:
                 _aplog.info(f"SKIP {sym}: no setup (A+ long or Fade short — score below threshold or outside window)")
+                continue
+
+            # ── Lunch-hour block (12:00–14:00 ET) ───────────────────── #
+            # Structural setups (IB retest, ORB, Fade) all degrade in the
+            # low-volume, mean-reverting chop of the midday session.
+            # Block new entries rather than letting score carry the weight.
+            if _regime.get("tod") == "lunch":
+                _aplog.info(
+                    f"SKIP {sym}: lunch window (12–2pm ET) — "
+                    f"structural setups degrade in low-volume chop"
+                )
                 continue
 
             # ── TopStep combine: hard daily loss limit ──────────────── #
@@ -633,11 +672,12 @@ def _ap_run_cycle(broker: "PaperBroker") -> None:
             except Exception:
                 pass   # DB not ready — skip guard, don't block trade
 
-            # ── Dynamic sizing: score-tier risk multiplier ─────────────── #
-            _risk_mult = _score_to_risk_mult(sig)
+            # ── Dynamic sizing: score-tier + regime-gated risk multiplier ── #
+            _risk_mult = _score_to_risk_mult(sig, _regime)
             _aplog.info(
                 f"SIZE {sym}: strategy={sig.get('strategy')} score={sig['score']:.2f} "
-                f"→ risk_mult={_risk_mult:.2f}×"
+                f"tod={_regime.get('tod','?')} adx={_regime.get('adx',0):.0f} "
+                f"atr_pct={_regime.get('atr_pct',100)} → risk_mult={_risk_mult:.2f}×"
             )
 
             # Execute paper trade

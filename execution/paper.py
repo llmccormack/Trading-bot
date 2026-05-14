@@ -113,14 +113,18 @@ class PaperBroker:
             rows = conn.execute("""
                 SELECT id, symbol, direction, qty, entry_price,
                        stop_loss, take_profit, opened_at, notes,
-                       COALESCE(target_1, 0.0)   AS target_1,
-                       COALESCE(be_moved, FALSE)  AS be_moved
+                       COALESCE(target_1, 0.0)            AS target_1,
+                       COALESCE(be_moved, FALSE)           AS be_moved,
+                       COALESCE(original_stop, 0.0)        AS original_stop,
+                       COALESCE(partial_pnl_booked, 0.0)   AS partial_pnl_booked
                 FROM positions WHERE status = 'OPEN'
             """).fetchall()
             conn.close()
             for row in rows:
-                t1       = float(row[9])
-                be_moved = bool(row[10])
+                t1                = float(row[9])
+                be_moved          = bool(row[10])
+                original_stop     = float(row[11])
+                partial_pnl_booked = float(row[12])
 
                 # ── Fallback T1: if DB has no target_1 (old row), infer it ──
                 # T1 sits halfway between entry and take_profit.
@@ -131,19 +135,31 @@ class PaperBroker:
                 if t1 == 0.0 and tp_px != 0.0 and not be_moved:
                     t1 = round(entry_px + (tp_px - entry_px) / 2.0, 4)
 
+                # ── Fallback original_stop ────────────────────────────────
+                # For old positions that pre-date this column, infer from
+                # T1: if T1 and entry are known, the original stop was at
+                # roughly entry − (T1 − entry) (symmetric 2R setup).
+                # Without this, _log_journal would compute R as None on
+                # any position that survived a restart after the T1 partial.
+                if original_stop == 0.0 and t1 != 0.0 and entry_px != 0.0:
+                    direction_sign = 1 if row[2] == "LONG" else -1
+                    original_stop = round(entry_px - direction_sign * abs(t1 - entry_px), 4)
+
                 pos = Position(
-                    id            = row[0],
-                    symbol        = row[1],
-                    direction     = row[2],
-                    qty           = row[3],
-                    entry_price   = entry_px,
-                    stop_loss     = float(row[5]),
-                    take_profit   = tp_px,
-                    target_1      = t1,
-                    be_moved      = be_moved,
-                    opened_at     = row[7],
-                    strategy_used = (row[8] or "").split(":")[0].strip(),
-                    status        = "OPEN",
+                    id                  = row[0],
+                    symbol              = row[1],
+                    direction           = row[2],
+                    qty                 = row[3],
+                    entry_price         = entry_px,
+                    stop_loss           = float(row[5]),
+                    take_profit         = tp_px,
+                    target_1            = t1,
+                    be_moved            = be_moved,
+                    original_stop       = original_stop,
+                    partial_pnl_booked  = partial_pnl_booked,
+                    opened_at           = row[7],
+                    strategy_used       = (row[8] or "").split(":")[0].strip(),
+                    status              = "OPEN",
                 )
                 self._positions[pos.id] = pos
 
@@ -416,12 +432,12 @@ class PaperBroker:
         conn.execute("""
             INSERT INTO positions
             (id, symbol, direction, qty, entry_price, stop_loss, take_profit,
-             target_1, be_moved, opened_at, status, notes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             target_1, be_moved, original_stop, opened_at, status, notes)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
             pos.id, pos.symbol, pos.direction, pos.qty,
             pos.entry_price, pos.stop_loss, pos.take_profit,
-            pos.target_1, pos.be_moved,
+            pos.target_1, pos.be_moved, pos.original_stop,
             pos.opened_at.isoformat(), pos.status,
             f"{pos.strategy_used}: {pos.ai_reasoning[:200]}"
         ])
@@ -444,10 +460,12 @@ class PaperBroker:
         conn.close()
 
     def _update_partial(self, pos: Position) -> None:
-        """Persist qty reduction + stop move + be_moved flag after a partial exit."""
+        """Persist qty reduction + stop move + be_moved flag + partial PnL after T1 exit."""
         conn = duckdb.connect(self.db_path)
-        conn.execute("UPDATE positions SET qty=?, stop_loss=?, be_moved=TRUE WHERE id=?",
-                     [pos.qty, pos.stop_loss, pos.id])
+        conn.execute(
+            "UPDATE positions SET qty=?, stop_loss=?, be_moved=TRUE, partial_pnl_booked=? WHERE id=?",
+            [pos.qty, pos.stop_loss, pos.partial_pnl_booked, pos.id],
+        )
         conn.close()
 
     def _log_partial_journal(
