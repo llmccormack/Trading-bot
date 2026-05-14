@@ -47,8 +47,10 @@ class Position:
     entry_price: float = 0
     stop_loss: float = 0
     take_profit: float = 0
-    target_1: float = 0.0   # partial exit / break-even trigger (T1); 0 = disabled
-    be_moved: bool = False   # True after stop was moved to break-even at T1
+    target_1: float = 0.0          # partial exit / break-even trigger (T1); 0 = disabled
+    be_moved: bool = False          # True after stop was moved to break-even at T1
+    original_stop: float = 0.0     # stop level at trade open, before any trailing/ratchet
+    partial_pnl_booked: float = 0.0  # net PnL already banked at the T1 partial exit
     opened_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     closed_at: datetime | None = None
     exit_price: float | None = None
@@ -197,6 +199,7 @@ class PaperBroker:
             target_1=target_1,
             strategy_used=strategy_used,
             ai_reasoning=ai_reasoning,
+            original_stop=stop_loss,   # preserved; stop_loss moves after T1
         )
 
         self._positions[pos.id] = pos
@@ -283,6 +286,7 @@ class PaperBroker:
                     pos.qty       = half_qty          # runner: half position remains
                     pos.stop_loss = pos.entry_price   # move to break-even
                     pos.be_moved  = True
+                    pos.partial_pnl_booked += partial_pnl   # accumulate for total-R calc
 
                     self.account_balance                   += partial_pnl
                     self.risk_manager._daily_realized_pnl  += partial_pnl  # credit but keep position open
@@ -465,8 +469,16 @@ class PaperBroker:
         conn.close()
 
     def _log_journal(self, pos: Position, reason: str) -> None:
-        initial_risk = abs(pos.entry_price - pos.stop_loss) * pos.qty
-        r_multiple = pos.realized_pnl / initial_risk if initial_risk > 0 else None
+        # Use the stop level at trade-open time so R is consistent regardless of
+        # whether the stop trailed to break-even after T1.  Fall back to current
+        # stop_loss only when original_stop was not recorded (e.g. reloaded positions).
+        stop_ref     = pos.original_stop if pos.original_stop > 0 else pos.stop_loss
+        original_qty = pos.qty * 2 if pos.be_moved else pos.qty
+        initial_risk = abs(pos.entry_price - stop_ref) * original_qty
+        # Include PnL already banked at the T1 partial exit so R reflects the
+        # whole trade, not just the runner leg.
+        total_pnl    = (pos.partial_pnl_booked or 0.0) + (pos.realized_pnl or 0.0)
+        r_multiple   = total_pnl / initial_risk if initial_risk > 0 else None
 
         conn = duckdb.connect(self.db_path)
         # Guard: skip if a full-close journal entry already exists for this position
@@ -484,8 +496,8 @@ class PaperBroker:
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [
             str(uuid.uuid4()), pos.id, pos.symbol, pos.direction,
-            pos.entry_price, pos.exit_price, pos.qty,
-            pos.realized_pnl, r_multiple,
+            pos.entry_price, pos.exit_price, original_qty,
+            round(total_pnl, 2), r_multiple,
             pos.strategy_used, pos.ai_reasoning[:500],
             pos.opened_at.isoformat(), pos.closed_at.isoformat()
         ])

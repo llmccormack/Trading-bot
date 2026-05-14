@@ -81,8 +81,7 @@ class FadeTheRipEngine:
             row = df.iloc[i]
 
             # ── Track new day ──────────────────────────────────── #
-            today = (int(row["hour_et"]), int(row["min_et"]))
-            trade_day = str(df.index[i])[:10]
+            trade_day = str(row["date_et"])   # ET calendar date string
             if trade_day != last_trade_day:
                 trades_today = 0
                 last_trade_day = trade_day
@@ -362,4 +361,5 @@ class FadeTheRipEngine:
                     ts_et = idx.tz_localize("UTC").tz_convert(ET)
             df["hour_et"] = ts_et.dt.hour
             df["min_et"]  = ts_et.dt.minute
+            df["date_et"] = ts_et.dt.date   # ET calendar date — used as daily trade-count key
         return df

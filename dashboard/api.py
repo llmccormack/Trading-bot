@@ -244,7 +244,9 @@ def _check_strategy_health(strategy: str, min_trades: int = 15) -> tuple[str, fl
         conn = duckdb.connect(DB_PATH)
         rows = conn.execute(
             """SELECT r_multiple FROM trade_journal
-               WHERE strategy_used = ? AND r_multiple IS NOT NULL
+               WHERE strategy_used = ?
+                 AND r_multiple IS NOT NULL
+                 AND ai_reasoning != 'partial_exit_t1'
                ORDER BY closed_at DESC LIMIT 20""",
             [strategy],
         ).fetchall()
